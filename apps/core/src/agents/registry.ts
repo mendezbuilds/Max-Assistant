@@ -1,4 +1,5 @@
 import { runJobScout } from "./job-scout";
+import { runAlphaScout } from "./alpha-scout";
 
 /**
  * Every runnable agent, keyed the same as its Agent.key in the DB. Shared by
@@ -9,4 +10,5 @@ import { runJobScout } from "./job-scout";
  */
 export const AGENT_RUNNERS: Record<string, () => Promise<void>> = {
   "job-scout": runJobScout,
+  "alpha-scout": runAlphaScout,
 };

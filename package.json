@@ -13,6 +13,7 @@
     "dev:core": "npm run dev --workspace=@max/core",
     "dev:dashboard": "npm run dev --workspace=@max/dashboard",
     "trigger:job-scout": "npm run trigger --workspace=@max/core -- job-scout",
+    "trigger:alpha-scout": "npm run trigger --workspace=@max/core -- alpha-scout",
     "build": "npm run build --workspace=@max/db && npm run build --workspace=@max/shared && npm run build --workspace=@max/core && npm run build --workspace=@max/dashboard"
   },
   "devDependencies": {

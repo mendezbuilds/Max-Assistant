@@ -54,9 +54,15 @@ export function startScheduler() {
   // Job boards don't move fast enough to justify polling more often than this.
   cron.schedule("*/30 * * * *", () => runIfEnabled("job-scout", AGENT_RUNNERS["job-scout"]));
 
+  // Alpha-scout's testnet/airdrop tasks are more time-sensitive (limited
+  // windows, deadlines) than job postings — a slightly tighter interval
+  // than job-scout's; no specific interval was given in the spec, so this
+  // is a judgment call, easy to tune.
+  cron.schedule("*/20 * * * *", () => runIfEnabled("alpha-scout", AGENT_RUNNERS["alpha-scout"]));
+
   setInterval(checkManualTriggers, 10_000);
 
   console.log(
-    "[scheduler] started (heartbeat every 15m, job-scout every 30m when enabled, manual triggers polled every 10s)"
+    "[scheduler] started (heartbeat every 15m, job-scout every 30m, alpha-scout every 20m, when enabled; manual triggers polled every 10s)"
   );
 }
