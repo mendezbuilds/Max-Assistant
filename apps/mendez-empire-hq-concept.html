@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mendez Empire HQ — Concept</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.44.0/iconfont/tabler-icons.min.css">
+<style>
+  html,body{margin:0;padding:0;background:#000;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+  #app{background:#0a0c0e;min-height:100vh;position:relative;display:flex;flex-direction:column;overflow:hidden;}
+  .alert{background:#1f1a10;border:1px solid #4a3a1e;border-radius:6px;padding:7px 10px;font-size:12px;color:#c8dcdc;display:flex;align-items:center;}
+  .chip{background:#12181a;border:1px solid #2a3a3f;border-radius:6px;padding:6px 12px;font-size:11px;color:#a8c0c0;display:flex;align-items:center;gap:5px;cursor:pointer;}
+  .feed{background:#12181a;border:1px solid #2a3a3f;border-radius:6px;padding:6px 8px;font-size:10px;color:#a8c0c0;margin-bottom:5px;}
+  .sched{background:#12181a;border:1px solid #2a3a3f;border-radius:6px;padding:7px 9px;font-size:10px;color:#a8c0c0;margin-bottom:6px;display:flex;justify-content:space-between;cursor:pointer;}
+  .sched span{color:#5a7878;font-size:9px;}
+  .orbiter{position:absolute;width:0;height:0;}
+  .counter1{animation:spinring1r 26s linear infinite;position:relative;}
+  .node{position:absolute;width:36px;height:36px;border-radius:50%;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;cursor:pointer;}
+  .node.ringed::before{content:"";position:absolute;width:50px;height:17px;border:1px solid rgba(160,180,210,0.4);border-radius:50%;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-20deg);}
+  .nlabel{position:absolute;top:23px;left:50%;transform:translateX(-50%);font-size:10px;white-space:nowrap;}
+  .clabel{position:absolute;transform:translate(-50%,-50%);font-size:10px;letter-spacing:1px;}
+  .star{position:absolute;background:#3f5a5a;border-radius:50%;}
+  @keyframes spinring1{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  @keyframes spinring1r{from{transform:rotate(0deg)}to{transform:rotate(-360deg)}}
+  @keyframes radarspin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  @keyframes morph{
+    0%{border-radius:60% 40% 55% 45%/50% 60% 40% 50%;transform:translate(-50%,-50%) scale(1);}
+    33%{border-radius:45% 55% 40% 60%/55% 45% 60% 40%;transform:translate(-50%,-50%) scale(1.05);}
+    66%{border-radius:55% 45% 60% 40%/40% 55% 45% 60%;transform:translate(-50%,-50%) scale(0.97);}
+    100%{border-radius:60% 40% 55% 45%/50% 60% 40% 50%;transform:translate(-50%,-50%) scale(1);}
+  }
+  @keyframes talk{
+    0%{border-radius:55% 45% 60% 40%/45% 55% 40% 60%;transform:translate(-50%,-50%) scale(1);}
+    20%{border-radius:40% 60% 45% 55%/60% 40% 55% 45%;transform:translate(-50%,-50%) scale(1.1);}
+    40%{border-radius:60% 40% 35% 65%/40% 60% 45% 55%;transform:translate(-50%,-50%) scale(0.95);}
+    60%{border-radius:45% 55% 60% 40%/55% 45% 60% 40%;transform:translate(-50%,-50%) scale(1.06);}
+    80%{border-radius:65% 35% 45% 55%/35% 65% 40% 60%;transform:translate(-50%,-50%) scale(0.97);}
+    100%{border-radius:55% 45% 60% 40%/45% 55% 40% 60%;transform:translate(-50%,-50%) scale(1);}
+  }
+  .talking{animation:talk 0.9s ease-in-out infinite !important;box-shadow:0 0 26px 8px rgba(90,180,180,0.6), inset -6px -6px 12px rgba(0,0,0,0.4) !important;}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid #2a3a3f;">
+    <div style="font-size:12px;color:#7fd9d8;letter-spacing:1px;">MAX_OS // MENDEZ_EMPIRE_HQ</div>
+    <div style="display:flex;gap:12px;align-items:center;">
+      <span style="font-size:10px;color:#5a7878;">UPTIME 4h 12m</span>
+      <div style="display:flex;gap:5px;align-items:center;">
+        <span id="statusdot" style="width:6px;height:6px;border-radius:50%;background:#5fe08a;"></span>
+        <span id="statustext" style="font-size:10px;color:#6b8a8a;">ONLINE</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex;justify-content:space-between;padding:8px 16px;border-bottom:1px solid #1e2c2e;">
+    <span style="font-size:10px;color:#5a7878;">AGENTS <b style="color:#7fe9a4;">2</b>/17</span>
+    <span style="font-size:10px;color:#5a7878;">SOURCES <b style="color:#c8dcdc;">17</b></span>
+    <span style="font-size:10px;color:#5a7878;">MATCHES <b style="color:#c8dcdc;">9</b></span>
+    <span style="font-size:10px;color:#5a7878;">CREDIT <b style="color:#e0a24a;">–</b></span>
+  </div>
+
+  <div style="padding:10px 16px 0;">
+    <div class="alert"><i class="ti ti-alert-triangle" style="font-size:13px;color:#e0a24a;"></i>&nbsp;<span style="color:#e0a24a;">3 sources</span>&nbsp;failed last run — check logs</div>
+  </div>
+
+  <div style="display:flex;gap:8px;padding:10px 16px 0;">
+    <div class="chip" onclick="openPanel('sched')"><i class="ti ti-calendar" style="font-size:12px;"></i> Schedule</div>
+    <div class="chip" onclick="openPanel('activity')"><i class="ti ti-report" style="font-size:12px;"></i> Activity</div>
+  </div>
+
+  <div id="orbitview" style="flex:1;position:relative;overflow:hidden;transition:opacity 0.4s ease;">
+    <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">
+      <div id="stars" style="position:absolute;inset:0;"></div>
+      <div style="position:relative;width:340px;height:340px;z-index:2;">
+        <div style="position:absolute;top:0;left:0;width:340px;height:340px;border-radius:50%;border:1px solid #1e2c2e;"></div>
+        <div style="position:absolute;top:0;left:0;width:340px;height:340px;border-radius:50%;overflow:hidden;animation:radarspin 6s linear infinite;">
+          <div style="width:100%;height:100%;background:conic-gradient(from 0deg, rgba(90,180,180,0.25), transparent 50deg);"></div>
+        </div>
+        <div id="maxcore" style="position:absolute;top:170px;left:170px;transform:translate(-50%,-50%);width:64px;height:64px;background:radial-gradient(circle at 35% 30%, #4a7a80, #1a2a2c 75%);box-shadow:0 0 14px 4px rgba(90,180,180,0.3), inset -6px -6px 12px rgba(0,0,0,0.4);z-index:5;animation:morph 6s ease-in-out infinite;display:flex;align-items:center;justify-content:center;">
+          <i class="ti ti-brain" style="font-size:17px;color:#9fd8d8;"></i>
+        </div>
+        <div class="clabel" style="top:214px;left:170px;color:#9fd8d8;">MAX</div>
+
+        <div style="position:absolute;top:0;left:0;width:340px;height:340px;animation:spinring1 26s linear infinite;">
+          <div class="orbiter" style="top:0px;left:170px;"><div class="counter1"><div class="node ringed" id="n-job" style="background:radial-gradient(circle at 35% 30%,#5fe08a,#12321f 75%);box-shadow:0 0 12px 2px rgba(52,201,121,0.5), inset -4px -4px 8px rgba(0,0,0,0.4);" onclick="openAgent('job',this)"><i class="ti ti-target" style="color:#effff2;font-size:14px;"></i></div><div class="nlabel" style="color:#7fe9a4;">Job scout</div></div></div>
+          <div class="orbiter" style="top:170px;left:340px;"><div class="counter1"><div class="node" id="n-alpha" style="background:radial-gradient(circle at 35% 30%,#c98bf0,#241e2a 75%);box-shadow:0 0 12px 2px rgba(201,139,240,0.4), inset -4px -4px 8px rgba(0,0,0,0.4);" onclick="openAgent('alpha',this)"><i class="ti ti-compass" style="color:#f7ecff;font-size:14px;"></i></div><div class="nlabel" style="color:#c98bf0;">Alpha scout</div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="sidepanel" style="position:absolute;top:0;right:0;bottom:0;width:210px;background:#0d1112;border-left:1px solid #2a3a3f;transform:translateX(100%);transition:transform 0.3s ease;padding:12px;overflow:auto;z-index:10;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div id="panel-title" style="font-size:11px;color:#5a7878;">UPCOMING</div>
+        <i class="ti ti-x" style="font-size:13px;color:#5a7878;cursor:pointer;" onclick="closePanel()"></i>
+      </div>
+      <div id="panel-sched">
+        <div class="sched" onclick="showSchedDetail(0)">Sun · Telegram post<span>7:00 PM</span></div>
+        <div class="sched" onclick="showSchedDetail(1)">Mon · Job scout poll<span>Every 30m</span></div>
+        <div id="scheddetail" style="display:none;margin-top:8px;background:#12181a;border:1px solid #2a3a3f;border-radius:6px;padding:8px;font-size:10px;color:#a8c0c0;white-space:pre-wrap;"></div>
+      </div>
+      <div id="panel-activity" style="display:none;">
+        <div class="feed">Job scout: 1 checked, 0 matched</div>
+        <div class="feed" style="color:#e0a24a;">Mercor: fetch failed</div>
+        <div class="feed" style="color:#e0a24a;">Web3.career: fetch failed</div>
+        <div class="feed" style="color:#e0a24a;">WorkingNomads: terminated</div>
+        <div class="feed">Alpha scout: dexscreener + airdrops.io matches sent</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="zoomclone" style="display:none;position:absolute;border-radius:50%;z-index:20;transition:all 0.5s cubic-bezier(.4,0,.2,1);"></div>
+
+  <div id="detailview" style="display:none;flex:1;flex-direction:column;padding:1rem;opacity:0;transition:opacity 0.3s ease;">
+    <div style="background:#080a0a;border:1px solid #2a3a3f;border-radius:6px;padding:12px;flex:1;font-family:monospace;font-size:11px;color:#7fe9a4;line-height:1.6;overflow:auto;">
+      <div id="chatlog" style="white-space:pre-wrap;"></div>
+    </div>
+    <button onclick="closeAgent()" style="align-self:flex-start;margin-top:8px;background:#12181a;border:1px solid #2a3a3f;color:#a8c0c0;border-radius:6px;padding:6px 14px;font-size:11px;cursor:pointer;">&larr; Back to orbit</button>
+  </div>
+
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 16px;border-top:1px solid #2a3a3f;font-size:10px;color:#5a7878;">
+    <span>17 SOURCES · 2 AGENTS ACTIVE</span>
+    <span>SYS.TIME 14:02:07</span>
+  </div>
+
+  <div style="padding:10px 16px;border-top:1px solid #2a3a3f;">
+    <input id="cmdinput" placeholder="Ask MAX, or say 'report on job scout'…" style="width:100%;box-sizing:border-box;background:#12181a;border:1px solid #2a3a3f;border-radius:6px;padding:9px 12px;color:#c8dcdc;font-size:11px;" onkeydown="if(event.key==='Enter')handleCmd()" />
+  </div>
+
+</div>
+
+<script>
+var starsEl=document.getElementById('stars');
+for(var i=0;i<80;i++){
+  var s=document.createElement('div');
+  s.className='star';
+  var size=Math.random()<0.75?1:(Math.random()<0.9?2:3);
+  s.style.width=size+'px';
+  s.style.height=size+'px';
+  s.style.left=Math.random()*100+'%';
+  s.style.top=Math.random()*100+'%';
+  s.style.opacity=(0.2+Math.random()*0.6).toFixed(2);
+  starsEl.appendChild(s);
+}
+
+function openPanel(which){
+  document.getElementById('sidepanel').style.transform='translateX(0)';
+  document.getElementById('panel-title').textContent=which==='sched'?'UPCOMING':'ACTIVITY LOG';
+  document.getElementById('panel-sched').style.display=which==='sched'?'block':'none';
+  document.getElementById('panel-activity').style.display=which==='activity'?'block':'none';
+}
+function closePanel(){
+  document.getElementById('sidepanel').style.transform='translateX(100%)';
+  document.getElementById('scheddetail').style.display='none';
+}
+var schedItems=["Telegram post — job digest recap\n\nThis week's top remote picks:\n3 web3 dev roles, 1 community manager gig.","Job scout — automated poll cycle\n\n(No draft — system task, not content.)"];
+function showSchedDetail(i){
+  var el=document.getElementById('scheddetail');
+  el.textContent=schedItems[i];
+  el.style.display='block';
+}
+
+var currentAgent=null;
+var agents={
+  job:{name:'Job scout',color:'radial-gradient(circle at 35% 30%,#5fe08a,#12321f 75%)',report:'AGENT: Job scout\nSTATUS: Active\n\n3 sources currently failing: Mercor, Web3.career, WorkingNomads.\n\nAsk me anything.'},
+  alpha:{name:'Alpha scout',color:'radial-gradient(circle at 35% 30%,#c98bf0,#241e2a 75%)',report:'AGENT: Alpha scout\nSTATUS: Active\n\nDelivering matches from DexScreener (Solana) and airdrops.io.\n\nAsk me anything.'}
+};
+var maxcore=document.getElementById('maxcore');
+function speak(text){
+  try{
+    var u=new SpeechSynthesisUtterance(text);
+    u.onstart=function(){ maxcore.className='talking'; };
+    u.onend=function(){ maxcore.className=''; maxcore.style.animation='morph 6s ease-in-out infinite'; };
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }catch(e){}
+}
+function setStatus(t){document.getElementById('statustext').textContent=t;}
+function handleCmd(){
+  var el=document.getElementById('cmdinput');
+  var val=el.value.trim();
+  if(!val)return;
+  el.value='';
+  var lower=val.toLowerCase();
+  if(currentAgent){
+    if(lower==='close'||lower==='back'||lower==='exit'){ closeAgent(); return; }
+    var log=document.getElementById('chatlog');
+    log.textContent+='\n\nYOU: '+val+'\n'+agents[currentAgent].name.toUpperCase()+': Checked it, nothing new since last update.';
+    speak('Checked it. Nothing new since last update.');
+    return;
+  }
+  setStatus('THINKING…');
+  setTimeout(function(){
+    setStatus('ONLINE');
+    if(lower.indexOf('job')>-1){
+      speak('Opening job scout report.');
+      openAgent('job',document.getElementById('n-job'));
+    }else if(lower.indexOf('alpha')>-1){
+      speak('Opening alpha scout report.');
+      openAgent('alpha',document.getElementById('n-alpha'));
+    }else{
+      speak('Both agents active, three sources need attention.');
+    }
+  },800);
+}
+function typeText(text){
+  var el=document.getElementById('chatlog');
+  el.textContent='';
+  var i=0;
+  var iv=setInterval(function(){
+    el.textContent+=text[i];
+    i++;
+    if(i>=text.length)clearInterval(iv);
+  },12);
+}
+function openAgent(id,el){
+  currentAgent=id;
+  var a=agents[id];
+  var rect=el.getBoundingClientRect();
+  var container=document.getElementById('orbitview');
+  var containerRect=container.getBoundingClientRect();
+  var clone=document.getElementById('zoomclone');
+  clone.style.background=a.color;
+  clone.style.left=(rect.left-containerRect.left)+'px';
+  clone.style.top=(rect.top-containerRect.top)+'px';
+  clone.style.width=rect.width+'px';
+  clone.style.height=rect.height+'px';
+  clone.style.display='block';
+  container.style.opacity='0';
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){
+      var s=180;
+      clone.style.left=(containerRect.width/2-s/2)+'px';
+      clone.style.top=(containerRect.height/2-s/2)+'px';
+      clone.style.width=s+'px';
+      clone.style.height=s+'px';
+    });
+  });
+  setTimeout(function(){
+    container.style.display='none';
+    clone.style.display='none';
+    document.getElementById('detailview').style.display='flex';
+    requestAnimationFrame(function(){
+      document.getElementById('detailview').style.opacity='1';
+      typeText(a.report);
+    });
+  },520);
+}
+function closeAgent(){
+  currentAgent=null;
+  document.getElementById('detailview').style.opacity='0';
+  setTimeout(function(){
+    document.getElementById('detailview').style.display='none';
+    var container=document.getElementById('orbitview');
+    container.style.display='block';
+    container.style.opacity='1';
+  },300);
+}
+</script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma, logActivity } from "@max/db";
 
-/** Current state of one agent — used by AgentCard's "Run now" polling to notice when a manually-triggered run has completed (lastActionAt moves). */
+/** Current state of one agent — used by the orbit's manual-trigger polling to notice when a run has completed (lastActionAt moves), and by the polled /api/agents refresh. */
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ key: string }> }) {
   const { key } = await params;
   const agent = await prisma.agent.findUnique({ where: { key } });
