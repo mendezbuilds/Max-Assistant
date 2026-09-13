@@ -1,15 +1,25 @@
 import cron from "node-cron";
+import { prisma } from "@max/db";
 import { log } from "./logger";
+import { runJobScout } from "./agents/job-scout";
 
 /**
- * Phase 0 has no real agents yet, so this just proves the pattern future
- * agents will register into: a cron job that does work, then logs through
- * the shared logger (which also updates the dashboard + can call notify()).
- *
- * Real agents (Phase 1+) should each get their own cron.schedule() call here
- * (or move to their own module imported from here), gated by the Agent's
- * `enabled` flag in the DB so the dashboard toggle actually does something.
+ * Each real agent gets its own cron.schedule() call here, gated by the
+ * Agent's `enabled` flag in the DB so the dashboard toggle actually does
+ * something. Errors are caught per-agent so one agent misbehaving can't take
+ * the whole scheduler down.
  */
+async function runIfEnabled(agentKey: string, run: () => Promise<void>) {
+  const agent = await prisma.agent.findUnique({ where: { key: agentKey } });
+  if (!agent?.enabled) return;
+
+  try {
+    await run();
+  } catch (err) {
+    await log(agentKey, "error", `Run failed: ${(err as Error).message}`);
+  }
+}
+
 export function startScheduler() {
   // Every 15 minutes: a heartbeat so "is core actually alive" is answerable
   // from the activity feed alone, without SSH-ing into the box.
@@ -17,5 +27,8 @@ export function startScheduler() {
     await log("system", "info", "heartbeat — Max core is alive");
   });
 
-  console.log("[scheduler] started (heartbeat every 15m)");
+  // Job boards don't move fast enough to justify polling more often than this.
+  cron.schedule("*/30 * * * *", () => runIfEnabled("job-scout", runJobScout));
+
+  console.log("[scheduler] started (heartbeat every 15m, job-scout every 30m when enabled)");
 }

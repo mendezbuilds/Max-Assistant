@@ -45,7 +45,7 @@ export function createBot(token: string): Bot {
   return bot;
 }
 
-/** Send a message to every registered Telegram chat (usually just Mendez's). */
+/** Send a message to every registered Telegram chat (usually just Mendez's). This is the "private feed" for agents like job-scout. */
 export async function notify(message: string) {
   if (!bot) {
     console.warn("[telegram] notify() called before the bot was started; skipping:", message);
@@ -65,6 +65,33 @@ export async function notify(message: string) {
       })
     )
   );
+}
+
+/**
+ * Send a message to the public growth channel (e.g. job-scout's public feed).
+ * Distinct from notify(): this is one specific channel, not every registered
+ * private chat, and the bot must already be an admin of that channel able to
+ * post messages. Set TELEGRAM_PUBLIC_CHANNEL_ID in .env to enable it (a
+ * channel's id, e.g. from forwarding a message from it to @userinfobot).
+ */
+export async function notifyPublic(message: string) {
+  if (!bot) {
+    console.warn("[telegram] notifyPublic() called before the bot was started; skipping:", message);
+    return;
+  }
+
+  const channelId = process.env.TELEGRAM_PUBLIC_CHANNEL_ID;
+  if (!channelId) {
+    console.warn(
+      "[telegram] TELEGRAM_PUBLIC_CHANNEL_ID not set — public feed message dropped. " +
+        "Set it in .env once the bot is an admin of your growth channel."
+    );
+    return;
+  }
+
+  await bot.api.sendMessage(channelId, message, { parse_mode: "Markdown" }).catch((err) => {
+    console.error(`[telegram] failed to post to public channel ${channelId}`, err);
+  });
 }
 
 export function startBot(bot: Bot) {

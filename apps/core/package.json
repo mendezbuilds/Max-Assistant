@@ -11,6 +11,7 @@
     "@max/db": "*",
     "@max/shared": "*",
     "dotenv": "^16.4.5",
+    "fast-xml-parser": "^4.5.7",
     "grammy": "^1.30.0",
     "node-cron": "^4.6.0"
   },

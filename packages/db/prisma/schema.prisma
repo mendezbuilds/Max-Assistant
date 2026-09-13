@@ -49,3 +49,17 @@ model NotificationTarget {
   label     String?
   createdAt DateTime @default(now())
 }
+
+// Generic de-dup ledger shared by every scout-style agent (job-scout today;
+// alpha-scout/apartment-scout etc. later) so re-running a poll never re-alerts
+// on something already sent. `externalId` is whatever the source's own item
+// id is (e.g. a RemoteOK job id, a WWR listing URL).
+model SeenItem {
+  id         Int      @id @default(autoincrement())
+  agentKey   String
+  externalId String
+  createdAt  DateTime @default(now())
+
+  @@unique([agentKey, externalId])
+  @@index([agentKey])
+}
