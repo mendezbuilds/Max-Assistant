@@ -1,6 +1,6 @@
 # Max — Personal AI Agent Hub
 
-See [SPEC.md](./SPEC.md) for the full vision, architecture, and agent roster/build order. This repo implements **Phase 0** (dashboard skeleton + shared Telegram notification pipe) and two Phase 1 agents, **Job Scout** and **Alpha Scout**.
+See [SPEC.md](./SPEC.md) for the full vision, architecture, and agent roster/build order. This repo implements **Phase 0** (dashboard skeleton + shared Telegram notification pipe), two Phase 1 agents (**Job Scout**, **Alpha Scout**), and the scaffolding for a Phase 3 agent brought forward early (**NFT Whitelist Hunter**, currently source-less — see its section below).
 
 ## Layout
 
@@ -104,7 +104,7 @@ The underlying lesson still applies beyond this one notification: **running `app
 Two ways to run an enabled agent immediately, instead of waiting for its scheduled interval — useful for testing:
 
 - **Dashboard**: click "Run now" on the agent's card (only clickable when enabled). This sets `Agent.triggerRequestedAt`; the running `apps/core` process picks it up within ~10 seconds (`checkManualTriggers` in `scheduler.ts`) and runs it — a click won't feel perfectly instant, since it's the same "dashboard writes state, core reads state" pattern as the enable/disable toggle, not a direct call between the two processes. The card's "last action" and the activity feed update once the run actually finishes.
-- **CLI**: `npm run trigger:job-scout` / `npm run trigger:alpha-scout` (generically: `npm run trigger --workspace=@max/core -- <agent-key>`). Runs in its own short-lived process, talking directly to the shared DB — does **not** require `apps/core`'s long-running process to be up. This is the faster path for local debugging.
+- **CLI**: `npm run trigger:job-scout` / `npm run trigger:alpha-scout` / `npm run trigger:nft-whitelist` (generically: `npm run trigger --workspace=@max/core -- <agent-key>`). Runs in its own short-lived process, talking directly to the shared DB — does **not** require `apps/core`'s long-running process to be up. This is the faster path for local debugging.
 
 Both require the agent to already be `enabled`, and both are wired through one shared registry — [apps/core/src/agents/registry.ts](./apps/core/src/agents/registry.ts) — so adding a new agent there makes it triggerable both ways automatically. Manual-trigger log lines are recorded under `"system"` rather than the agent's own key (a subtlety: logging them under the agent's key would move its `lastActionAt` immediately on the *request*, before the run actually finished, confusing the dashboard's completion-detection polling — search the code for the comment on this if touching it).
 
@@ -127,6 +127,23 @@ Two signal types:
 - **[sources/stubs.ts](./apps/core/src/agents/alpha-scout/sources/stubs.ts)**: **DappRadar** has an official API, but it's behind a signup-gated key and its docs site was unreachable from here (repeated DNS failures) — stubbed rather than guessed blind, unlike Web3.career/Covalent where at least partial docs were reachable. **X/Twitter** stubbed for the same paid-API-tier reason as job-scout.
 
 Deadline detection ([deadline.ts](./apps/core/src/agents/alpha-scout/deadline.ts)) is a best-effort keyword scan (`deadline`, `ends`, `expires`, `until`, ...) returning the matching snippet as-is — deliberately not parsed into a hard date, since source text is too varied ("48 hours left", "until further notice") to normalize reliably.
+
+## NFT Whitelist Hunter (Phase 3, built early)
+
+Lives in [apps/core/src/agents/nft-whitelist](./apps/core/src/agents/nft-whitelist) (Agent.key is `wl-hunter`, matching the roster — the folder/npm-script name is just friendlier). Same shape as alpha-scout: no quality filter (every lead surfaces, per spec — you judge each one), private feed only.
+
+**Currently has zero live sources** — this is the honest outcome of actually checking, not a build that was left unfinished. Both categories from the spec were investigated and neither panned out yet:
+
+- **X/Twitter** — same paid-API-tier reason as the other two agents.
+- **Dedicated NFT-tracking site** — four checked, per the spec's own instruction to verify before committing (same standard as Web3.career/Covalent/airdrops.io earlier):
+  - **nftcalendar.io** — its actual events page is behind Cloudflare's bot challenge; nothing short of a real headless browser gets past that.
+  - **PREMINT** — has a real API, but it's per-project (`api.premint.xyz/v1/<project_key>/`) for a project owner to manage their own list — no "list all active campaigns" discovery endpoint exists.
+  - **nftevening.com** — the closest miss: a genuinely clean, free, official WordPress REST API (`/wp-json/wp/v2/event`) with real structured fields. Caught by checking *freshness*, not just structure: its most recent entry is from September 2024, and even its informal blog roundup series stopped around March 2026. Shipping this would have looked done while silently finding nothing, forever.
+  - **Alphabot** — the platform that best matches the spec's own language (task-based follow/RT/Discord campaigns is literally its product) and has a real documented API — gated behind "an active subscription" per its own docs.
+
+Full detail and exact reasoning is in [sources/stubs.ts](./apps/core/src/agents/nft-whitelist/sources/stubs.ts). Everything else — scheduler wiring (every 20 minutes when enabled), manual trigger (`npm run trigger:nft-whitelist`), dashboard card, message format, verification-status logic — is fully built; a real source just needs its `fetch()` implemented and swapped in, same as any other source in this codebase.
+
+**Verification status is deliberately always "Unverified" in this build.** The spec's core safety requirement — cross-reference a project's own official links before calling a mint site/contract "Verified" — needs something this pipeline doesn't have yet: either a real X API (to check a project's own bio for its official link) or a dedicated contract/security-check API. Checking that a contract merely *exists on-chain* wouldn't actually satisfy this: a scam site's contract is also a real, existing contract — that check doesn't distinguish "official" from "convincing fake" at all, which is the actual threat model here. Rather than build a check that looks like verification but doesn't hold up, every lead defaults to `verified: false` with an explanatory note — see the header comment on [types.ts](./apps/core/src/agents/nft-whitelist/types.ts). [GoPlus Security](https://gopluslabs.io/) came up during research as a plausible free API for a real contract-risk check later; not integrated here, just flagged as a lead worth following up.
 
 ## Docker
 

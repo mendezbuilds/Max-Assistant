@@ -60,9 +60,13 @@ export function startScheduler() {
   // is a judgment call, easy to tune.
   cron.schedule("*/20 * * * *", () => runIfEnabled("alpha-scout", AGENT_RUNNERS["alpha-scout"]));
 
+  // WL windows can be just as tight as testnet/airdrop ones — same interval
+  // as alpha-scout, same judgment-call reasoning.
+  cron.schedule("*/20 * * * *", () => runIfEnabled("wl-hunter", AGENT_RUNNERS["wl-hunter"]));
+
   setInterval(checkManualTriggers, 10_000);
 
   console.log(
-    "[scheduler] started (heartbeat every 15m, job-scout every 30m, alpha-scout every 20m, when enabled; manual triggers polled every 10s)"
+    "[scheduler] started (heartbeat every 15m, job-scout every 30m, alpha-scout/wl-hunter every 20m, when enabled; manual triggers polled every 10s)"
   );
 }

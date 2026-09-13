@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 import { AlphaSource, RawSignal } from "../types";
-import { detectDeadline } from "../deadline";
+import { detectDeadline } from "../../../lib/deadline";
 import { fetchWithRetry } from "../../../lib/http";
 
 /**
