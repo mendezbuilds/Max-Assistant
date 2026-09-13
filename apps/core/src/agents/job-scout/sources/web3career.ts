@@ -1,5 +1,5 @@
 import { JobSource, RawListing } from "../types";
-import { parsePayFromText, annualUsdToHourly } from "../pay";
+import { annualUsdToHourly } from "../pay";
 import { stripHtml } from "./xml";
 
 /**
@@ -7,48 +7,35 @@ import { stripHtml } from "./xml";
  * token you request from them — set WEB3_CAREER_API_TOKEN in .env to enable
  * this source; until then it behaves like the other not-configured stubs.
  *
- * ⚠️ Unverified response shape: their docs page didn't expose the exact JSON
- * field names (the full reference is behind a signup-gated docs site I
- * couldn't access without a token), only that `token`/`remote`/`tag`/`limit`
- * are query params and `apply_url` exists on each job. This parser is a
- * best-effort guess at common field-name variants, filtered defensively so a
- * wrong guess yields zero results (logged) rather than garbage output. If
- * this logs "fetched 0 jobs" once a real token is set, the field names below
- * need adjusting against an actual response — worth a spot-check on first run.
+ * Verified live against a real token (2026-09-13). The initial guess at the
+ * response shape was wrong — it's not a flat array of jobs, nor a wrapped
+ * {jobs:[...]}. The real shape is a 3-element top-level array:
+ * `[usageHelpText, termsOfServiceText, realJobsArray]` — the actual jobs are
+ * at index 2. Their ToS (surfaced in that same text) requires linking back
+ * via apply_url with a followable link and crediting web3.career as the
+ * source, or they'll suspend API access — keep that in mind if this output
+ * is ever displayed somewhere other than a private/semi-private Telegram
+ * feed.
  */
 const API_URL = "https://web3.career/api/v1";
 
-interface Web3CareerJobGuess {
-  id?: string | number;
-  job_id?: string | number;
+interface Web3CareerJob {
+  id: number;
+  date?: string;
+  is_remote?: boolean;
   title?: string;
-  position?: string;
   company?: string;
-  company_name?: string;
+  location?: string;
+  apply_url?: string;
   tags?: string[];
   description?: string;
-  desc?: string;
-  apply_url?: string;
-  url?: string;
-  link?: string;
-  salary?: string;
-  salary_text?: string;
-  salary_min?: number;
-  salary_max?: number;
-  date?: string;
-  published_at?: string;
-  posted_at?: string;
-}
-
-function unwrapList(data: unknown): Web3CareerJobGuess[] {
-  if (Array.isArray(data)) return data;
-  if (data && typeof data === "object") {
-    const obj = data as Record<string, unknown>;
-    for (const key of ["jobs", "data", "results"]) {
-      if (Array.isArray(obj[key])) return obj[key] as Web3CareerJobGuess[];
-    }
-  }
-  return [];
+  salary_min_value?: number | null;
+  salary_max_value?: number | null;
+  // Web3.career's own estimate when the poster didn't give an explicit
+  // range — still a genuinely useful pay signal, not a guess this code is
+  // making itself.
+  estimated_min_salary?: number | null;
+  estimated_max_salary?: number | null;
 }
 
 export const web3CareerSource: JobSource = {
@@ -72,42 +59,39 @@ export const web3CareerSource: JobSource = {
       throw new Error(`Web3.career API returned ${res.status}`);
     }
 
-    const jobs = unwrapList(await res.json());
+    const body = (await res.json()) as unknown;
+    const jobs: Web3CareerJob[] = Array.isArray(body) && Array.isArray(body[2]) ? body[2] : [];
 
     return jobs
-      .filter((job) => (job.title || job.position) && (job.apply_url || job.url || job.link))
+      .filter((job) => job.id && job.title && job.apply_url)
       .map((job): RawListing => {
-        const title = job.title ?? job.position ?? "Untitled role";
-        const description = stripHtml(job.description ?? job.desc ?? "");
-        const searchText = [title, job.company, job.company_name, description, ...(job.tags ?? [])]
+        const description = stripHtml(job.description ?? "");
+        const searchText = [job.title, job.company, description, ...(job.tags ?? [])]
           .filter(Boolean)
           .join(" ");
 
-        const salaryText = job.salary ?? job.salary_text;
-        let hourlyUsd: number | undefined;
-        if (job.salary_min || job.salary_max) {
-          const min = job.salary_min ?? job.salary_max!;
-          const max = job.salary_max ?? job.salary_min!;
-          hourlyUsd = annualUsdToHourly((min + max) / 2);
-        } else if (salaryText) {
-          hourlyUsd = parsePayFromText(salaryText);
-        } else {
-          hourlyUsd = parsePayFromText(description);
-        }
+        const min = job.salary_min_value ?? job.estimated_min_salary;
+        const max = job.salary_max_value ?? job.estimated_max_salary;
+        const hourlyUsd = min || max ? annualUsdToHourly(((min ?? max)! + (max ?? min)!) / 2) : undefined;
+        const payText =
+          min || max
+            ? `$${Math.round((min ?? max)! / 1000)}k-${Math.round((max ?? min)! / 1000)}k/year` +
+              (job.salary_min_value == null ? " (estimated)" : "")
+            : undefined;
 
         return {
-          externalId: `web3career:${job.id ?? job.job_id ?? job.apply_url ?? job.url}`,
+          externalId: `web3career:${job.id}`,
           source: "Web3.career",
           kind: "job",
-          posterUsername: job.company ?? job.company_name ?? "unknown",
-          title,
+          posterUsername: job.company ?? "unknown",
+          title: job.title!,
           summary: description.slice(0, 300) + (description.length > 300 ? "…" : ""),
-          payText: salaryText,
+          payText,
           hourlyUsd,
-          url: job.apply_url ?? job.url ?? job.link!,
-          postedAt: new Date(job.date ?? job.published_at ?? job.posted_at ?? Date.now()),
+          url: job.apply_url!,
+          postedAt: job.date ? new Date(job.date) : new Date(),
           tags: job.tags,
-          remote: true, // requested via the API's own remote=true filter
+          remote: job.is_remote, // authoritative field the API itself provides
           searchText,
         };
       });

@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma, logActivity } from "@max/db";
 
+/** Current state of one agent — used by AgentCard's "Run now" polling to notice when a manually-triggered run has completed (lastActionAt moves). */
+export async function GET(_req: NextRequest, { params }: { params: Promise<{ key: string }> }) {
+  const { key } = await params;
+  const agent = await prisma.agent.findUnique({ where: { key } });
+  if (!agent) {
+    return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+  }
+  return NextResponse.json(agent);
+}
+
 /**
  * Toggling an agent here only flips the DB row. apps/core is the process
  * that actually owns scheduling agents — it checks `enabled` before running

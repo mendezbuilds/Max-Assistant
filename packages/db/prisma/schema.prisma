@@ -21,6 +21,12 @@ model Agent {
   status           String    @default("idle") // idle | running | error | disabled
   lastActionAt     DateTime?
   lastActionSummary String?
+  // Set by the dashboard's "Run now" button (or left null for a CLI trigger,
+  // which runs directly and doesn't need this) to ask core to run this
+  // agent immediately, outside its normal cron interval. Core's fast poll
+  // (see apps/core/src/scheduler.ts) clears it back to null the moment it
+  // picks the request up, so a slow run can't cause a second trigger.
+  triggerRequestedAt DateTime?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 }

@@ -8,14 +8,17 @@ import { JobSource, RawListing } from "../types";
  * COVALENT_API_KEY name) in .env to enable — behaves like the other
  * not-configured sources until then.
  *
- * ⚠️ Highest-uncertainty source in this file — flagging clearly rather than
- * quietly hoping it's right:
- * - I don't have a live API key to test against, so the exact response
- *   envelope/field names below (see CovalentLogEvent) are based on
- *   Covalent's documented "decoded log event" shape used elsewhere in their
- *   API, not a verified response from this specific endpoint. If this logs
- *   "0 events" repeatedly with a real key set, that's the first thing to
- *   check against an actual response.
+ * Verified live against a real GOLDRUSH_API_KEY (2026-09-13): the initial
+ * guess at the endpoint was wrong (`/events/address/{contract}/` — 400s,
+ * requires `starting-block`; even once fixed, returns nothing for *any*
+ * contract, including ones with guaranteed constant activity like WETH — it
+ * doesn't seem to actually work). The correct endpoint is
+ * `/events/topics/{topicHash}/` with `sender-address` to scope it to one
+ * contract, confirmed by real decoded PoolCreated events coming back
+ * exactly matching CovalentLogEvent's shape below. The computed topic0 also
+ * checked out for real — it matched real events, which is the actual proof
+ * that mattered (see the note on it further down).
+ *
  * - "New launch" here = a new Uniswap V3 pool creation. The factory
  *   contract address (below) is the same across all four chains because
  *   Uniswap deploys it via CREATE2 with the same salt on every chain — a
@@ -40,11 +43,23 @@ const UNISWAP_V3_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 const POOL_CREATED_SIGNATURE = "PoolCreated(address,address,uint24,int24,address)";
 const POOL_CREATED_TOPIC0 = "0x" + keccak256(POOL_CREATED_SIGNATURE);
 
-const CHAINS: Array<{ covalentName: string; dexScreenerId: string; label: string }> = [
-  { covalentName: "eth-mainnet", dexScreenerId: "ethereum", label: "Ethereum" },
-  { covalentName: "base-mainnet", dexScreenerId: "base", label: "Base" },
-  { covalentName: "arbitrum-mainnet", dexScreenerId: "arbitrum", label: "Arbitrum" },
-  { covalentName: "optimism-mainnet", dexScreenerId: "optimism", label: "Optimism" },
+// blockLookback is deliberately generous (covers well over an hour even on
+// a wrong guess at block time) rather than precisely tuned — Covalent
+// charges per call, not per block scanned, and SeenItem dedup makes an
+// overlapping window harmless, whereas too small a window on a chain
+// that's faster than assumed would silently miss real launches between
+// polls. L2 block times also drift over time, so these are approximations,
+// not measured constants — reduce if this turns out to over-fetch.
+const CHAINS: Array<{
+  covalentName: string;
+  dexScreenerId: string;
+  label: string;
+  blockLookback: number;
+}> = [
+  { covalentName: "eth-mainnet", dexScreenerId: "ethereum", label: "Ethereum", blockLookback: 300 },
+  { covalentName: "base-mainnet", dexScreenerId: "base", label: "Base", blockLookback: 3600 },
+  { covalentName: "arbitrum-mainnet", dexScreenerId: "arbitrum", label: "Arbitrum", blockLookback: 14_400 },
+  { covalentName: "optimism-mainnet", dexScreenerId: "optimism", label: "Optimism", blockLookback: 3600 },
 ];
 
 interface CovalentLogEvent {
@@ -69,8 +84,28 @@ function getApiKey(): string | undefined {
   return process.env.GOLDRUSH_API_KEY ?? process.env.COVALENT_API_KEY;
 }
 
-async function fetchNewPools(chain: { covalentName: string }, apiKey: string): Promise<CovalentLogEvent[]> {
-  const url = `https://api.covalenthq.com/v1/${chain.covalentName}/events/address/${UNISWAP_V3_FACTORY}/`;
+async function getTipHeight(covalentName: string, apiKey: string): Promise<number> {
+  const url = `https://api.covalenthq.com/v1/${covalentName}/block_v2/latest/`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
+  if (!res.ok) {
+    throw new Error(`Covalent block_v2/latest (${covalentName}) returned ${res.status}`);
+  }
+  const body = (await res.json()) as { data?: { chain_tip_height?: number } };
+  const height = body.data?.chain_tip_height;
+  if (!height) throw new Error(`Covalent block_v2/latest (${covalentName}) returned no chain_tip_height`);
+  return height;
+}
+
+async function fetchNewPools(
+  chain: { covalentName: string; blockLookback: number },
+  apiKey: string
+): Promise<CovalentLogEvent[]> {
+  const tip = await getTipHeight(chain.covalentName, apiKey);
+  const startingBlock = Math.max(0, tip - chain.blockLookback);
+
+  const url =
+    `https://api.covalenthq.com/v1/${chain.covalentName}/events/topics/${POOL_CREATED_TOPIC0}/` +
+    `?sender-address=${UNISWAP_V3_FACTORY}&starting-block=${startingBlock}&ending-block=latest`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
@@ -81,6 +116,8 @@ async function fetchNewPools(chain: { covalentName: string }, apiKey: string): P
   const body = (await res.json()) as { data?: { items?: CovalentLogEvent[] } };
   const items = body.data?.items ?? [];
 
+  // Redundant given the topic is already in the URL, but cheap insurance
+  // against the API ever returning more than asked for.
   return items.filter((item) => item.raw_log_topics?.[0]?.toLowerCase() === POOL_CREATED_TOPIC0);
 }
 
