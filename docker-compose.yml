@@ -1,0 +1,22 @@
+services:
+  core:
+    build:
+      context: .
+      dockerfile: apps/core/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/repo/data
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/repo/data
+    depends_on:
+      - core

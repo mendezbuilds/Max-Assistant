@@ -1,0 +1,51 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// One row per agent in the roster (see SPEC.md). Rows are seeded from
+// packages/shared/src/agents.config.ts — never hand-edited — so the roster
+// stays config-driven instead of hardcoded into migrations.
+model Agent {
+  id               Int       @id @default(autoincrement())
+  key              String    @unique // stable slug, e.g. "job-scout"
+  name             String
+  icon             String // emoji or icon identifier shown on the dashboard card
+  description      String
+  phase            Int // build phase from SPEC.md (0-5)
+  enabled          Boolean   @default(false)
+  status           String    @default("idle") // idle | running | error | disabled
+  lastActionAt     DateTime?
+  lastActionSummary String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+// Central activity feed shown at the top of the dashboard. Every agent run
+// (and core system events) writes here. agentKey is a loose reference to
+// Agent.key (not a DB foreign key) so system-level entries (agentKey =
+// "system") can be logged without needing a matching Agent row.
+model ActivityLog {
+  id        Int      @id @default(autoincrement())
+  agentKey  String
+  level     String   @default("info") // info | warn | error
+  message   String
+  meta      String? // optional JSON blob for structured detail
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([agentKey])
+}
+
+// Telegram chats that should receive notifications. Populated when someone
+// sends /start to the bot; the shared notify() helper broadcasts to all of them.
+model NotificationTarget {
+  id        Int      @id @default(autoincrement())
+  chatId    String   @unique
+  label     String?
+  createdAt DateTime @default(now())
+}
