@@ -1,4 +1,5 @@
 import { JobSource, RawListing } from "../types";
+import { fetchWithRetry } from "../../../lib/http";
 
 /**
  * Mercor has no public jobs API/RSS, but unlike Turing and micro1 (pure
@@ -44,11 +45,23 @@ export const mercorSource: JobSource = {
   name: "mercor",
 
   async fetch(): Promise<RawListing[]> {
-    const res = await fetch(PAGE_URL, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; MaxJobScout/1.0)" },
+    // A fuller, more browser-like header set than a bare User-Agent — a
+    // real product site's bot protection (Cloudflare etc.) is more likely
+    // to flag an obviously-minimal request, and this is a live signal we
+    // can't just retry our way past if it's genuinely a block rather than
+    // a blip; fetchWithRetry's status/body detail in the thrown error is
+    // what tells the two apart.
+    const res = await fetchWithRetry(PAGE_URL, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
     });
     if (!res.ok) {
-      throw new Error(`Mercor page returned ${res.status}`);
+      const body = await res.text().catch(() => "");
+      throw new Error(`Mercor page returned ${res.status}: ${body.slice(0, 300)}`);
     }
 
     const data = extractNextData(await res.text()) as

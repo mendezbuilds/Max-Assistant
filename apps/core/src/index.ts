@@ -12,7 +12,7 @@ dotenv.config({ path: path.resolve(__dirname, "..", "..", "..", ".env") });
 process.env.MAX_DB_FILE ??= path.resolve(__dirname, "..", "..", "..", "data", "max.db");
 
 import { optionalEnv } from "@max/shared";
-import { createBot, notify, startBot } from "./telegram";
+import { createBot, notifyOnBoot, startBot } from "./telegram";
 import { startScheduler } from "./scheduler";
 import { log } from "./logger";
 
@@ -35,7 +35,7 @@ async function main() {
 
   await log("system", "info", "Max core started");
   if (telegramToken) {
-    await notify("🟢 *Max core is online.*");
+    await notifyOnBoot("🟢 *Max core is online.*");
   }
 }
 

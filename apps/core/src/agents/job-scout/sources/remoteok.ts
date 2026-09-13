@@ -1,5 +1,6 @@
 import { JobSource, RawListing } from "../types";
 import { annualUsdToHourly, parsePayFromText } from "../pay";
+import { fetchWithRetry } from "../../../lib/http";
 
 // RemoteOK returns raw HTML in `description` — strip tags for a plain-text
 // summary rather than pulling in a full HTML parser for this alone.
@@ -32,7 +33,7 @@ export const remoteOkSource: JobSource = {
   name: "remoteok",
 
   async fetch(): Promise<RawListing[]> {
-    const res = await fetch("https://remoteok.com/api", {
+    const res = await fetchWithRetry("https://remoteok.com/api", {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (compatible; MaxJobScout/1.0; +https://github.com/) job-board-reader",
@@ -40,7 +41,8 @@ export const remoteOkSource: JobSource = {
     });
 
     if (!res.ok) {
-      throw new Error(`RemoteOK API returned ${res.status}`);
+      const body = await res.text().catch(() => "");
+      throw new Error(`RemoteOK API returned ${res.status}: ${body.slice(0, 300)}`);
     }
 
     const data = (await res.json()) as unknown;

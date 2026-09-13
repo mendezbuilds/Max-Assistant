@@ -94,6 +94,47 @@ export async function notifyPublic(message: string) {
   });
 }
 
+// A dev-mode file watcher (tsx watch) restarts core on every source edit —
+// each restart's boot sequence would otherwise re-send this notification
+// for real, every time, to a live chat. Caught in production (2026-09):
+// 13 "online" messages in ~3 minutes during one active editing session.
+// Not a crash loop or a scheduler bug — the 15-minute heartbeat never sends
+// to Telegram at all (see scheduler.ts), only logs to the activity feed;
+// this was purely the boot notification firing on every restart trigger.
+//
+// Gated against the ActivityLog history rather than in-memory state,
+// deliberately — in-memory state resets on exactly the restarts this needs
+// to detect, which would defeat the point. No new table needed: "Max core
+// started" is already logged unconditionally on every boot (cheap, DB-only,
+// no reason to skip it) — this just checks how recently that happened
+// *before* this boot, and suppresses the real Telegram send if it was too
+// recent to plausibly be a genuine redeploy rather than a dev-mode restart.
+const BOOT_NOTIFY_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
+export async function notifyOnBoot(message: string) {
+  const recentBoots = await prisma.activityLog.findMany({
+    where: { agentKey: "system", message: "Max core started" },
+    orderBy: { createdAt: "desc" },
+    take: 2,
+  });
+
+  // recentBoots[0] is this boot's own "Max core started" line (logged just
+  // before this is called) — [1], if present, is the previous one.
+  const previousBoot = recentBoots[1];
+  if (previousBoot) {
+    const msSincePrevious = Date.now() - previousBoot.createdAt.getTime();
+    if (msSincePrevious < BOOT_NOTIFY_COOLDOWN_MS) {
+      console.log(
+        `[telegram] suppressing boot notification — core restarted ${Math.round(msSincePrevious / 1000)}s ` +
+          "after the last one (looks like a dev-mode file-watcher restart, not a real redeploy)"
+      );
+      return;
+    }
+  }
+
+  await notify(message);
+}
+
 export function startBot(bot: Bot) {
   // bot.start() long-polls forever; run it without awaiting so it doesn't
   // block the scheduler from also starting.

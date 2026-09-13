@@ -1,6 +1,6 @@
 # Max — Personal AI Agent Hub
 
-See [SPEC.md](./SPEC.md) for the full vision, architecture, and agent roster/build order. This repo implements **Phase 0** (dashboard skeleton + shared Telegram notification pipe) and the first Phase 1 agent, **Job Scout**.
+See [SPEC.md](./SPEC.md) for the full vision, architecture, and agent roster/build order. This repo implements **Phase 0** (dashboard skeleton + shared Telegram notification pipe) and two Phase 1 agents, **Job Scout** and **Alpha Scout**.
 
 ## Layout
 
@@ -81,18 +81,52 @@ Wiring in a real source later is just implementing the `JobSource` interface in 
 
 **De-dup**: a shared `SeenItem` table (in `@max/db`) tracks every listing ever fetched per agent, so re-polling never re-alerts on the same posting — built generically so alpha-scout/apartment-scout can reuse it later.
 
+## Reliability: retries, degraded sources, and filter reasoning
+
+Three sources (`mercor`, `web3career`, `workingnomads`) were caught failing during an unattended overnight run — `"fetch failed"`/`"terminated"`, no further detail. Root cause: every source called plain `fetch()` with no timeout and no retry, so a network blip (or, for `workingnomads`, a hung connection — "terminated" is what Node's fetch throws when a connection drops mid-request with nothing to time it out) turned into a full miss with a useless error message.
+
+Fixed with shared infrastructure every job-scout and alpha-scout source now uses, rather than a per-source patch:
+- **[lib/http.ts](./apps/core/src/lib/http.ts)** — `fetchWithRetry()` wraps `fetch()` with a per-attempt timeout (default 15s) and retry-with-backoff on network errors, timeouts, 429, and 5xx (not on other 4xx — those won't succeed on retry). On final failure it surfaces the *real* cause (`err.cause`, or the response body) instead of a bare "fetch failed".
+- **[lib/source-health.ts](./apps/core/src/lib/source-health.ts)** — tracks consecutive failures per `(agent, source)` in memory. Three in a row logs a distinct `error`-level "⚠️ DEGRADED" line instead of repeating the same `warn`, so a source that's actually broken doesn't look identical to a one-off blip in the activity feed. In-memory only (resets on process restart) — a deliberate scope limit, not an oversight; a durable version would need a new DB table, which felt like more than this warranted.
+
+Separately, job-scout only ever logged pass/fail *counts* per run, with no way to tell "working correctly but strict" apart from "broken filter logic". [filter.ts](./apps/core/src/agents/job-scout/filter.ts)'s `applyFilters` now returns *why* — pass with the listing, or reject with the specific reason (`"not remote"`, `"pay ($5.00/hr) below $10/hr floor"`, etc.) — logged per listing to the **console only**, not the shared ActivityLog/dashboard feed. That's deliberate: a normal run checks 50-150+ listings, and logging one line per listing there would (a) flood the feed past usefulness and (b) since writing to the agent's own activity log updates its `lastActionAt` as a side effect, the *last* debug line would become the card's "last action" instead of the real run summary. Console output (visible in `apps/core`'s own terminal/log) is where per-listing debugging belongs; the dashboard keeps showing the aggregate summary line it already did.
+
+## ⚠️ Dev-mode restarts and live Telegram credentials
+
+`npm run dev:core` runs via `tsx watch` — it restarts the whole process on every source file save. If `.env` has a real `TELEGRAM_BOT_TOKEN`, **every one of those restarts is a real boot**, and the "🟢 Max core is online" notice used to fire on every single one of them: 28 messages went out to a real chat in about 7 minutes during one active editing session before this was caught and fixed.
+
+Fixed in [telegram.ts](./apps/core/src/telegram.ts)'s `notifyOnBoot()`: it checks how long ago the *previous* "Max core started" line was logged (already-recorded ActivityLog history, not new state — in-memory state would reset on exactly the restarts this needs to detect) and suppresses the real send if it was less than 5 minutes ago. A genuine, isolated restart still notifies; a burst of dev-mode restarts from active editing now only notifies once.
+
+The underlying lesson still applies beyond this one notification: **running `apps/core` with live credentials while actively editing its source will trigger real sends on every restart**, for anything that fires on boot or on a short poll interval. If you're doing a coding session that touches `apps/core`, consider running with a `.env` that has `TELEGRAM_BOT_TOKEN` blank (or agents disabled) until you're ready to test for real.
+
 ## Manually triggering an agent
 
 Two ways to run an enabled agent immediately, instead of waiting for its scheduled interval — useful for testing:
 
 - **Dashboard**: click "Run now" on the agent's card (only clickable when enabled). This sets `Agent.triggerRequestedAt`; the running `apps/core` process picks it up within ~10 seconds (`checkManualTriggers` in `scheduler.ts`) and runs it — a click won't feel perfectly instant, since it's the same "dashboard writes state, core reads state" pattern as the enable/disable toggle, not a direct call between the two processes. The card's "last action" and the activity feed update once the run actually finishes.
-- **CLI**: `npm run trigger:job-scout` (generically: `npm run trigger --workspace=@max/core -- <agent-key>`). Runs in its own short-lived process, talking directly to the shared DB — does **not** require `apps/core`'s long-running process to be up. This is the faster path for local debugging.
+- **CLI**: `npm run trigger:job-scout` / `npm run trigger:alpha-scout` (generically: `npm run trigger --workspace=@max/core -- <agent-key>`). Runs in its own short-lived process, talking directly to the shared DB — does **not** require `apps/core`'s long-running process to be up. This is the faster path for local debugging.
 
 Both require the agent to already be `enabled`, and both are wired through one shared registry — [apps/core/src/agents/registry.ts](./apps/core/src/agents/registry.ts) — so adding a new agent there makes it triggerable both ways automatically. Manual-trigger log lines are recorded under `"system"` rather than the agent's own key (a subtlety: logging them under the agent's key would move its `lastActionAt` immediately on the *request*, before the run actually finished, confusing the dashboard's completion-detection polling — search the code for the comment on this if touching it).
 
 ⚠️ **Both paths actually send real Telegram messages** if the agent's run finds matches and `TELEGRAM_BOT_TOKEN`/`TELEGRAM_PUBLIC_CHANNEL_ID` are set — there's no dry-run mode. Think about de-dup state (`SeenItem`) before the first real trigger of a newly-added or newly-fixed source: if it's never successfully run before, *everything* it finds counts as new, which can mean a large first batch. Both bugs below were caught precisely from this being true unexpectedly:
 - The CLI trigger's first version silently sent nothing at all, in *any* configuration — it never called `createBot()`, so `notify()`/`notifyPublic()` always no-op'd. Fixed by initializing the bot client (not its long-polling loop — that stays exclusive to the real `apps/core` process) at the top of `cli/trigger.ts`.
 - job-scout was found already enabled with a live run in its history that neither of us had triggered this session — traced to an old, still-running `core` process from earlier testing. It turned out safe (that process's Telegram bot was never initialized either, at the time), but it's a reminder that a long-running dev process left up across sessions can act on state changes made through the dashboard at any time. Stop `apps/core` between sessions if you don't want that.
+
+## Alpha Scout (Phase 1)
+
+Lives in [apps/core/src/agents/alpha-scout](./apps/core/src/agents/alpha-scout). Reuses job-scout's plumbing (scheduler, retry/health, `SeenItem` dedup, manual trigger) but is much simpler on purpose: no role/pay filtering (nothing in its spec calls for it), and **private feed only** for now — no public/growth-channel split yet.
+
+Two signal types:
+
+**Token/project launches** — same "launch + active social presence" compound signal as job-scout's on-chain source, extended to more chains:
+- **[sources/covalent.ts](./apps/core/src/agents/alpha-scout/sources/covalent.ts)** — Ethereum, Base, Arbitrum, Optimism, Polygon, BNB Chain. All verified live. The Uniswap V3 factory address is the same across the first five (confirmed real `PoolCreated` events on each), but **not** BNB Chain — its deployment came later via separate governance at a different address (`0xdB1d...61F7`); using the "universal" address there silently found nothing until checked directly.
+- **[sources/solana.ts](./apps/core/src/agents/alpha-scout/sources/solana.ts)** — deliberately **not** built on Covalent like the EVM chains. Covalent's Solana data only exposes new-pool/DEX activity via real-time streams, not a poll-friendly REST endpoint, which doesn't fit a 20-minute cron. Uses DexScreener's token-profiles feed alone instead, as both detector and social-check in one call.
+
+**Testnet/airdrop tasks** — time-sensitive by nature (spec calls for timestamping + deadline-flagging):
+- **[sources/airdropsio.ts](./apps/core/src/agents/alpha-scout/sources/airdropsio.ts)** — no official API/RSS (its default WordPress feed only carries blog posts, not listings), but its listing page is plain server-rendered HTML with a stable, well-structured custom-post-type markup (verified) — parsed with `cheerio` rather than regex. A public directory page with no login, not the kind of scraping-risk case LinkedIn/Wellfound are.
+- **[sources/stubs.ts](./apps/core/src/agents/alpha-scout/sources/stubs.ts)**: **DappRadar** has an official API, but it's behind a signup-gated key and its docs site was unreachable from here (repeated DNS failures) — stubbed rather than guessed blind, unlike Web3.career/Covalent where at least partial docs were reachable. **X/Twitter** stubbed for the same paid-API-tier reason as job-scout.
+
+Deadline detection ([deadline.ts](./apps/core/src/agents/alpha-scout/deadline.ts)) is a best-effort keyword scan (`deadline`, `ends`, `expires`, `until`, ...) returning the matching snippet as-is — deliberately not parsed into a hard date, since source text is too varied ("48 hours left", "until further notice") to normalize reliably.
 
 ## Docker
 

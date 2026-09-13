@@ -1,6 +1,7 @@
 import { JobSource, RawListing } from "../types";
 import { parsePayFromText } from "../pay";
 import { createLenientXmlParser, stripHtml } from "./xml";
+import { fetchWithRetry } from "../../../lib/http";
 
 // WeWorkRemotely has no JSON API; per-category RSS feeds are the standard
 // integration point. Using the sitewide feed (rather than guessing category
@@ -24,11 +25,12 @@ export const weWorkRemotelySource: JobSource = {
     const listings: RawListing[] = [];
 
     for (const feedUrl of FEED_URLS) {
-      const res = await fetch(feedUrl, {
+      const res = await fetchWithRetry(feedUrl, {
         headers: { "User-Agent": "Mozilla/5.0 (compatible; MaxJobScout/1.0)" },
       });
       if (!res.ok) {
-        throw new Error(`WeWorkRemotely feed ${feedUrl} returned ${res.status}`);
+        const body = await res.text().catch(() => "");
+        throw new Error(`WeWorkRemotely feed ${feedUrl} returned ${res.status}: ${body.slice(0, 300)}`);
       }
 
       const xml = await res.text();

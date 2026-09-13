@@ -1,6 +1,7 @@
 import { JobSource, RawListing } from "../types";
 import { parsePayFromText } from "../pay";
 import { createLenientXmlParser, stripHtml } from "./xml";
+import { fetchWithRetry } from "../../../lib/http";
 
 const FEED_URL = "https://api.cryptojobslist.com/jobs.rss";
 

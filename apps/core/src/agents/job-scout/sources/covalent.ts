@@ -1,5 +1,6 @@
 import { keccak256 } from "js-sha3";
 import { JobSource, RawListing } from "../types";
+import { fetchWithRetry } from "../../../lib/http";
 
 /**
  * DEX/on-chain hiring signal, per addendum: Covalent (rebranded "GoldRush")
@@ -86,9 +87,10 @@ function getApiKey(): string | undefined {
 
 async function getTipHeight(covalentName: string, apiKey: string): Promise<number> {
   const url = `https://api.covalenthq.com/v1/${covalentName}/block_v2/latest/`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
+  const res = await fetchWithRetry(url, { headers: { Authorization: `Bearer ${apiKey}` } });
   if (!res.ok) {
-    throw new Error(`Covalent block_v2/latest (${covalentName}) returned ${res.status}`);
+    const body = await res.text().catch(() => "");
+    throw new Error(`Covalent block_v2/latest (${covalentName}) returned ${res.status}: ${body.slice(0, 300)}`);
   }
   const body = (await res.json()) as { data?: { chain_tip_height?: number } };
   const height = body.data?.chain_tip_height;
@@ -106,11 +108,12 @@ async function fetchNewPools(
   const url =
     `https://api.covalenthq.com/v1/${chain.covalentName}/events/topics/${POOL_CREATED_TOPIC0}/` +
     `?sender-address=${UNISWAP_V3_FACTORY}&starting-block=${startingBlock}&ending-block=latest`;
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   if (!res.ok) {
-    throw new Error(`Covalent events API (${chain.covalentName}) returned ${res.status}`);
+    const body = await res.text().catch(() => "");
+    throw new Error(`Covalent events API (${chain.covalentName}) returned ${res.status}: ${body.slice(0, 300)}`);
   }
 
   const body = (await res.json()) as { data?: { items?: CovalentLogEvent[] } };
@@ -124,7 +127,10 @@ async function fetchNewPools(
 /** Best-effort: does DexScreener show this pair as having a linked website/social? Returns false (not undefined) on any failure — "unconfirmed" and "no" are treated the same, since this check exists specifically to cut noise. */
 async function hasSocialPresence(dexScreenerId: string, poolAddress: string): Promise<boolean> {
   try {
-    const res = await fetch(`https://api.dexscreener.com/latest/dex/pairs/${dexScreenerId}/${poolAddress}`);
+    const res = await fetchWithRetry(
+      `https://api.dexscreener.com/latest/dex/pairs/${dexScreenerId}/${poolAddress}`,
+      { retries: 1 } // best-effort enrichment, not worth the same retry budget as a primary fetch
+    );
     if (!res.ok) return false;
     const body = (await res.json()) as { pairs?: DexScreenerPair[] };
     const pair = body.pairs?.[0];

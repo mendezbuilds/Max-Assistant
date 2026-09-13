@@ -1,6 +1,7 @@
 import { JobSource, RawListing } from "../types";
 import { annualUsdToHourly } from "../pay";
 import { stripHtml } from "./xml";
+import { fetchWithRetry } from "../../../lib/http";
 
 /**
  * Web3.career's Jobs API (https://web3.career/web3-jobs-api) requires a free
@@ -52,11 +53,12 @@ export const web3CareerSource: JobSource = {
     }
 
     const url = `${API_URL}?token=${encodeURIComponent(token)}&remote=true&limit=100`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       headers: { "User-Agent": "Mozilla/5.0 (compatible; MaxJobScout/1.0)" },
     });
     if (!res.ok) {
-      throw new Error(`Web3.career API returned ${res.status}`);
+      const body = await res.text().catch(() => "");
+      throw new Error(`Web3.career API returned ${res.status}: ${body.slice(0, 300)}`);
     }
 
     const body = (await res.json()) as unknown;

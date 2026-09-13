@@ -72,38 +72,55 @@ export const PUBLIC_FEED_OPTIONS: FilterOptions = {
 };
 
 /**
- * Applies the spec's filter criteria to one raw listing. Returns undefined if
- * it should be dropped, otherwise the listing enriched with role category +
- * priority.
+ * Same criteria as before, but the result says *why* — pass with the
+ * enriched listing, or reject with the specific reason a human (or a log
+ * line) can act on, rather than a bare undefined. No filter logic changed
+ * here; this is purely about making the existing decisions legible.
  */
-export function applyFilters(raw: RawListing, options: FilterOptions): MatchedListing | undefined {
-  if (!isRemote(raw)) return undefined;
+export type FilterResult =
+  | { outcome: "pass"; listing: MatchedListing }
+  | { outcome: "reject"; reason: string };
+
+/** Applies the spec's filter criteria to one raw listing. */
+export function applyFilters(raw: RawListing, options: FilterOptions): FilterResult {
+  if (!isRemote(raw)) {
+    return { outcome: "reject", reason: "not remote" };
+  }
 
   const roleCategory = classifyRole(raw);
-  if (!roleCategory) return undefined; // doesn't match any role we're watching for
+  if (!roleCategory) {
+    return { outcome: "reject", reason: "no matching role category in title/tags" };
+  }
 
   const payExempt = PAY_FLOOR_EXEMPT_CATEGORIES.has(roleCategory);
 
   // "Exclude unpaid roles" — equity-based roles are explicitly accepted per
   // spec, so this only fires on an explicit volunteer/no-compensation
   // signal, never merely on "no salary number was posted".
-  if (!payExempt && mentionsUnpaid(raw.searchText)) return undefined;
+  if (!payExempt && mentionsUnpaid(raw.searchText)) {
+    return { outcome: "reject", reason: "marked unpaid" };
+  }
 
   if (payExempt) {
     // Co-founder/ambassador/partnership leads: spec says the pay floor
     // doesn't apply cleanly here — always keep, standard priority.
-    return { ...raw, roleCategory, priority: "standard" };
+    return { outcome: "pass", listing: { ...raw, roleCategory, priority: "standard" } };
   }
 
   if (raw.hourlyUsd === undefined) {
     // Pay not listed/parseable — can't confirm it clears the floor, but we
     // also can't confirm it doesn't. Keep it rather than silently dropping a
     // possible match; format.ts will show pay as "not listed".
-    return { ...raw, roleCategory, priority: "standard" };
+    return { outcome: "pass", listing: { ...raw, roleCategory, priority: "standard" } };
   }
 
-  if (raw.hourlyUsd < options.minHourlyUsd) return undefined;
+  if (raw.hourlyUsd < options.minHourlyUsd) {
+    return {
+      outcome: "reject",
+      reason: `pay ($${raw.hourlyUsd.toFixed(2)}/hr) below $${options.minHourlyUsd}/hr floor`,
+    };
+  }
 
   const priority = raw.hourlyUsd >= options.highPriorityHourlyUsd ? "high" : "standard";
-  return { ...raw, roleCategory, priority };
+  return { outcome: "pass", listing: { ...raw, roleCategory, priority } };
 }

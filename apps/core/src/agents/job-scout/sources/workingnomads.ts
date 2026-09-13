@@ -1,6 +1,7 @@
 import { JobSource, RawListing } from "../types";
 import { parsePayFromText } from "../pay";
 import { stripHtml } from "./xml";
+import { fetchWithRetry } from "../../../lib/http";
 
 const API_URL = "https://www.workingnomads.com/api/exposed_jobs/";
 
@@ -20,11 +21,16 @@ export const workingNomadsSource: JobSource = {
   name: "workingnomads",
 
   async fetch(): Promise<RawListing[]> {
-    const res = await fetch(API_URL, {
+    // "terminated" (a connection dropping mid-request, with no built-in
+    // timeout to turn a hang into a clean error) was the actual failure
+    // seen in production here — fetchWithRetry's per-attempt timeout +
+    // retry is specifically for this.
+    const res = await fetchWithRetry(API_URL, {
       headers: { "User-Agent": "Mozilla/5.0 (compatible; MaxJobScout/1.0)" },
     });
     if (!res.ok) {
-      throw new Error(`Working Nomads API returned ${res.status}`);
+      const body = await res.text().catch(() => "");
+      throw new Error(`Working Nomads API returned ${res.status}: ${body.slice(0, 300)}`);
     }
 
     const jobs = (await res.json()) as WorkingNomadsJob[];

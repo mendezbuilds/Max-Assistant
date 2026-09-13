@@ -1,6 +1,7 @@
 import { filterUnseen, markSeen } from "@max/db";
 import { log } from "../../logger";
 import { notify, notifyPublic } from "../../telegram";
+import { recordSourceResult } from "../../lib/source-health";
 import { applyFilters, PRIVATE_FEED_OPTIONS, PUBLIC_FEED_OPTIONS } from "./filter";
 import { formatListing } from "./format";
 import { remoteOkSource } from "./sources/remoteok";
@@ -50,14 +51,42 @@ async function sendPaced(send: (text: string) => Promise<void>, listings: Matche
   }
 }
 
+/**
+ * Per-listing filter reasoning — console only, deliberately not the shared
+ * ActivityLog/dashboard feed. Logging one line per checked listing there
+ * (routinely 50-150+ per run) would (a) flood the feed other agents'
+ * activity shares, and (b) since logActivity() updates the agent's own
+ * lastActionAt as a side effect, the *last* debug line logged would become
+ * the card's "last action" instead of the actual run summary — the same
+ * trap the manual-trigger work hit and worked around. This is for "why did
+ * X pass/fail" debugging, not user-facing activity, so console (visible in
+ * the core process's own output) is where it belongs.
+ */
+function logDecision(title: string, source: string, verdict: string) {
+  console.log(`[job-scout] ${verdict} :: "${title}" (${source})`);
+}
+
 export async function runJobScout(): Promise<void> {
   const raw: RawListing[] = [];
 
   for (const source of ALL_SOURCES) {
     try {
-      raw.push(...(await source.fetch()));
+      const found = await source.fetch();
+      raw.push(...found);
+      recordSourceResult(AGENT_KEY, source.name, { ok: true });
     } catch (err) {
-      await log(AGENT_KEY, "warn", `Source "${source.name}" failed: ${(err as Error).message}`);
+      const errorMessage = (err as Error).message;
+      const status = recordSourceResult(AGENT_KEY, source.name, { ok: false, errorMessage });
+
+      if (status === "degraded") {
+        await log(
+          AGENT_KEY,
+          "error",
+          `⚠️ Source "${source.name}" DEGRADED — failing repeatedly across runs. Latest: ${errorMessage}`
+        );
+      } else {
+        await log(AGENT_KEY, "warn", `Source "${source.name}" failed: ${errorMessage}`);
+      }
     }
   }
 
@@ -80,11 +109,29 @@ export async function runJobScout(): Promise<void> {
   const privateMatches: MatchedListing[] = [];
   const publicMatches: MatchedListing[] = [];
   for (const listing of unseen) {
-    const privateMatch = applyFilters(listing, PRIVATE_FEED_OPTIONS);
-    if (privateMatch) privateMatches.push(privateMatch);
+    const privateResult = applyFilters(listing, PRIVATE_FEED_OPTIONS);
+    const publicResult = applyFilters(listing, PUBLIC_FEED_OPTIONS);
 
-    const publicMatch = applyFilters(listing, PUBLIC_FEED_OPTIONS);
-    if (publicMatch) publicMatches.push(publicMatch);
+    if (privateResult.outcome === "pass") privateMatches.push(privateResult.listing);
+    if (publicResult.outcome === "pass") publicMatches.push(publicResult.listing);
+
+    if (privateResult.outcome === "pass" || publicResult.outcome === "pass") {
+      const feeds = [
+        privateResult.outcome === "pass" && "private",
+        publicResult.outcome === "pass" && "public",
+      ]
+        .filter(Boolean)
+        .join("+");
+      logDecision(listing.title, listing.source, `PASS → ${feeds}`);
+    } else {
+      // Both feeds rejected — usually for the same reason, but not always
+      // (the public feed has no pay floor), so show both when they differ.
+      const reason =
+        privateResult.reason === publicResult.reason
+          ? privateResult.reason
+          : `private: ${privateResult.reason}; public: ${publicResult.reason}`;
+      logDecision(listing.title, listing.source, `REJECT (${reason})`);
+    }
   }
 
   await sendPaced(notify, privateMatches);
