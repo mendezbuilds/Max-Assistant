@@ -5,7 +5,18 @@ import { applyFilters, PRIVATE_FEED_OPTIONS, PUBLIC_FEED_OPTIONS } from "./filte
 import { formatListing } from "./format";
 import { remoteOkSource } from "./sources/remoteok";
 import { weWorkRemotelySource } from "./sources/weworkremotely";
-import { xSource, linkedInSource, dexScreenerSource } from "./sources/stubs";
+import { cryptoJobsListSource } from "./sources/cryptojobslist";
+import { workingNomadsSource } from "./sources/workingnomads";
+import { web3CareerSource } from "./sources/web3career";
+import { mercorSource } from "./sources/mercor";
+import { covalentSource } from "./sources/covalent";
+import {
+  xSource,
+  linkedInSource,
+  wellfoundSource,
+  turingSource,
+  micro1Source,
+} from "./sources/stubs";
 import { JobSource, MatchedListing, RawListing } from "./types";
 
 const AGENT_KEY = "job-scout";
@@ -15,9 +26,16 @@ const AGENT_KEY = "job-scout";
 const ALL_SOURCES: JobSource[] = [
   remoteOkSource,
   weWorkRemotelySource,
+  cryptoJobsListSource,
+  workingNomadsSource,
+  web3CareerSource,
+  mercorSource,
+  covalentSource,
   xSource,
   linkedInSource,
-  dexScreenerSource,
+  wellfoundSource,
+  turingSource,
+  micro1Source,
 ];
 
 function sleep(ms: number) {

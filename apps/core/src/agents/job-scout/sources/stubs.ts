@@ -1,23 +1,33 @@
 import { JobSource, RawListing } from "../types";
 
 /**
- * These three sources from the spec aren't implemented yet — each needs a
- * decision from Mendez before they safely can be:
+ * Sources deliberately not built — each needs a decision from Mendez, or
+ * simply has no automatable data to read, before it's safe/possible to
+ * build for real:
  *
  * - X/Twitter: the search/filtered-stream endpoints needed to watch
  *   hashtags/accounts require a paid API tier (the free tier doesn't cover
- *   search). Needs a decision on budget + an API key before this is wired up.
+ *   search). Revisit once free sources (job boards + on-chain) prove
+ *   insufficient on their own (per addendum).
  * - LinkedIn: has no public API for this, and scraping it violates their ToS
- *   (and risks the account it runs from getting banned) — this is *not*
- *   something to build without an explicit "yes, do this anyway" decision,
- *   given the risk. Recommend waiting for an official partner API angle, or
- *   manual watch for now.
- * - DEX/on-chain: needs a specific data provider chosen (e.g. DexScreener,
- *   Birdeye) and a definition of what "new launch" should trigger + how to
- *   turn a bare token launch into a role/company signal worth alerting on.
+ *   (and risks the account it runs from getting banned) — skipped for v1
+ *   per addendum. Left stubbed for reconsideration if a compliant method
+ *   (e.g. official Jobs API access) ever exists.
+ * - Wellfound (AngelList): checked — no public API or RSS exists; the only
+ *   programmatic access found is paid third-party scrapers (Apify) built
+ *   against their HTML, which carries the same ToS/fragility risk profile
+ *   as LinkedIn. Not built without an explicit go-ahead given that risk —
+ *   flagging rather than assuming, same as LinkedIn.
+ * - Turing / micro1: checked both — neither has discrete job listings at
+ *   all. Both are "create a profile, get matched later" application funnels
+ *   (Turing: developers.turing.com/signup; micro1: talent.micro1.ai/login) —
+ *   there's nothing here to poll or de-dup against. (Mercor, the third
+ *   AI-training platform from the same addendum, *does* have real listings
+ *   — see sources/mercor.ts.) If Mendez isn't already signed up to either,
+ *   that's a one-time manual action, not something to automate.
  *
  * Each still implements the JobSource interface and is wired into
- * ALL_SOURCES in index.ts, so turning one on later is just replacing its
+ * ALL_SOURCES in index.ts, so replacing a stub later is just replacing its
  * fetch() body — no changes needed anywhere else in the pipeline.
  */
 function stub(name: string, reason: string): JobSource {
@@ -26,7 +36,7 @@ function stub(name: string, reason: string): JobSource {
     name,
     async fetch(): Promise<RawListing[]> {
       if (!warned) {
-        console.warn(`[job-scout] ${name} source not configured yet: ${reason}`);
+        console.warn(`[job-scout] ${name} source not built: ${reason}`);
         warned = true;
       }
       return [];
@@ -41,10 +51,20 @@ export const xSource = stub(
 
 export const linkedInSource = stub(
   "linkedin",
-  "no public API; scraping would violate LinkedIn's ToS — needs an explicit decision before building"
+  "no public API; scraping would violate LinkedIn's ToS — skipped per addendum"
 );
 
-export const dexScreenerSource = stub(
-  "dexscreener",
-  "needs a chosen on-chain data provider + a rule for what counts as a hiring signal"
+export const wellfoundSource = stub(
+  "wellfound",
+  "no public API/RSS; only paid third-party HTML scrapers exist, same ToS/fragility risk as LinkedIn"
+);
+
+export const turingSource = stub(
+  "turing",
+  "no discrete listings — pure application funnel (developers.turing.com/signup); nothing to poll"
+);
+
+export const micro1Source = stub(
+  "micro1",
+  "no discrete listings — pure application funnel (talent.micro1.ai/login); nothing to poll"
 );

@@ -1,19 +1,12 @@
-import { XMLParser } from "fast-xml-parser";
 import { JobSource, RawListing } from "../types";
 import { parsePayFromText } from "../pay";
+import { createLenientXmlParser, stripHtml } from "./xml";
 
 // WeWorkRemotely has no JSON API; per-category RSS feeds are the standard
 // integration point. Using the sitewide feed (rather than guessing category
 // slugs) and letting filter.ts's role-keyword matching do the narrowing —
 // add more/narrower feed URLs here later if that turns out too broad.
 const FEED_URLS = ["https://weworkremotely.com/remote-jobs.rss"];
-
-function stripHtml(html: string): string {
-  return html
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 interface RssItem {
   title?: string;
@@ -27,14 +20,7 @@ export const weWorkRemotelySource: JobSource = {
   name: "weworkremotely",
 
   async fetch(): Promise<RawListing[]> {
-    // The sitewide feed has enough job descriptions (and HTML entities within
-    // them, e.g. "&amp;") to blow past fast-xml-parser's default entity
-    // limits (a billion-laughs-attack guard) on a normal, non-malicious feed
-    // — raise them rather than disabling the guard entirely.
-    const parser = new XMLParser({
-      ignoreAttributes: false,
-      processEntities: { enabled: true, maxTotalExpansions: 200_000, maxExpandedLength: 10_000_000 },
-    });
+    const parser = createLenientXmlParser();
     const listings: RawListing[] = [];
 
     for (const feedUrl of FEED_URLS) {

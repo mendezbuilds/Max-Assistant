@@ -5,6 +5,7 @@ export interface RawListing {
   source: string; // e.g. "remoteok", "weworkremotely"
   /** "job" = a formal listing with an apply link. "lead" = a founder/project signal with no listing yet (early opportunity, or a non-wage lead like co-founder/partnership/ambassador). */
   kind: "job" | "lead";
+  /** For an individual poster/company. Platform-posted sources (Mercor, and any future AI-training-gig platform) should just pass the platform's own name here instead — there's no individual poster. */
   posterUsername: string;
   title: string;
   summary: string;
@@ -18,6 +19,23 @@ export interface RawListing {
   tags?: string[];
   /** Full free text (title + description + tags) — used for the unpaid/remote checks, where a broad scan is appropriate, but deliberately NOT for role classification. */
   searchText: string;
+  /**
+   * Set when the source authoritatively knows remote status (e.g. an API's
+   * own `remote=true` filter, or a platform that's remote-only by design) —
+   * takes priority over the text-based "remote" keyword scan in filter.ts,
+   * which can false-negative on a listing that never bothers to restate
+   * "remote" in its own text. Leave unset to fall back to the text scan.
+   */
+  remote?: boolean;
+  /**
+   * Skips keyword classification entirely and assigns this category
+   * directly. For platform sources (Mercor, and similar AI-training/RLHF
+   * gig platforms) where every listing on the platform belongs to the same
+   * category regardless of how its individual title is worded — keyword
+   * matching a title like "Clinicians Survey" against "full-stack-dev" etc.
+   * would just fail to classify it at all.
+   */
+  forcedRoleCategory?: RoleCategory;
 }
 
 export type RoleCategory =
@@ -28,6 +46,8 @@ export type RoleCategory =
   | "ambassador"
   | "partnerships"
   | "co-founder"
+  | "ai-training-rlhf"
+  | "on-chain-lead"
   | "other";
 
 /** Role categories where an hourly pay floor doesn't apply cleanly (equity/commission-based by nature) — see filter.ts. */
@@ -35,6 +55,7 @@ export const PAY_FLOOR_EXEMPT_CATEGORIES: ReadonlySet<RoleCategory> = new Set([
   "ambassador",
   "partnerships",
   "co-founder",
+  "on-chain-lead", // an on-chain signal has no wage concept at all, not just an unlisted one
 ]);
 
 export interface MatchedListing extends RawListing {

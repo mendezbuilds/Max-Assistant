@@ -29,6 +29,8 @@ The dashboard and core are two independent processes that only share the SQLite 
    - `DASHBOARD_PASSWORD` — the password that gates the web dashboard.
    - `SESSION_SECRET` — any long random string (used to sign the session cookie).
    - `ANTHROPIC_API_KEY` — not used yet; agents from here on are keyword/rule-based, Claude gets wired in once an agent actually needs judgment calls.
+   - `WEB3_CAREER_API_TOKEN` — optional, enables the Web3.career source. Free, request at [web3.career/web3-jobs-api](https://web3.career/web3-jobs-api).
+   - `GOLDRUSH_API_KEY` — optional, enables the on-chain (Covalent/GoldRush) source. Reuse the key from ChainTale if you already have one.
    
    ⚠️ Only ever put real secrets in `.env` (gitignored). `.env.example` is committed to git — it should only ever hold placeholders.
 
@@ -56,19 +58,26 @@ The dashboard and core are two independent processes that only share the SQLite 
 
 Lives in [apps/core/src/agents/job-scout](./apps/core/src/agents/job-scout). Polls every 30 minutes when enabled (toggle on the dashboard card), keyword/rule-based only — no Claude calls yet, per spec.
 
-**Sources implemented:**
+**Sources implemented, verified against live data:**
 - **RemoteOK** ([sources/remoteok.ts](./apps/core/src/agents/job-scout/sources/remoteok.ts)) — public JSON API, no key needed.
 - **WeWorkRemotely** ([sources/weworkremotely.ts](./apps/core/src/agents/job-scout/sources/weworkremotely.ts)) — sitewide RSS feed (no JSON API exists).
+- **CryptoJobsList** ([sources/cryptojobslist.ts](./apps/core/src/agents/job-scout/sources/cryptojobslist.ts)) — RSS feed. Unlike the others, this board isn't remote-only, so the remote-keyword check actually does real filtering here.
+- **WorkingNomads** ([sources/workingnomads.ts](./apps/core/src/agents/job-scout/sources/workingnomads.ts)) — public JSON API, no key needed.
+- **Mercor** ([sources/mercor.ts](./apps/core/src/agents/job-scout/sources/mercor.ts)) — no public API, but its careers page (a Next.js site) embeds real structured listing data server-side (`__NEXT_DATA__`) that any visitor's browser already receives — reads that directly rather than scraping rendered HTML. All matches here are tagged **AI Training / RLHF** (a new role category) regardless of title wording, and show "Mercor" as the poster rather than an individual, per addendum.
 
-**Sources stubbed, not built yet** ([sources/stubs.ts](./apps/core/src/agents/job-scout/sources/stubs.ts)) — each needs a decision from you before it's safe/possible to build:
-- **X/Twitter** — the search/filtered-stream endpoints needed to watch hashtags and founder announcements require a *paid* X API tier. Needs a budget decision + API key.
-- **LinkedIn** — no public API for this; scraping it violates LinkedIn's ToS and risks the account it runs from getting banned. Deliberately not built without your explicit go-ahead given that risk — flagging rather than assuming.
-- **DEX/on-chain** — needs a data provider chosen (e.g. DexScreener, Birdeye) and a concrete rule for what counts as a "new launch → hiring signal" worth alerting on.
-- **Specific sites you name** — not built (spec left this as "Mendez to name") — tell me which and I'll add them the same way as the two boards above.
+**Sources implemented but unverified — need a live check once you have the key:**
+- **Web3.career** ([sources/web3career.ts](./apps/core/src/agents/job-scout/sources/web3career.ts)) — needs `WEB3_CAREER_API_TOKEN` (free, sign up required). Their full field-level API docs are behind that same signup gate, so the response parsing is a best-effort guess at common field names. If it logs "fetched 0 raw listings" once you've set the token, the field names need adjusting against a real response — let me know and I'll fix it against the actual shape.
+- **Covalent/GoldRush (on-chain)** ([sources/covalent.ts](./apps/core/src/agents/job-scout/sources/covalent.ts)) — needs `GOLDRUSH_API_KEY`. This is the highest-uncertainty piece in the whole agent — I don't have a key to test the exact response shape against, and I deliberately did *not* hand-type the event's topic hash from memory (an easy way to be silently, permanently wrong) — it's computed at runtime via `keccak256` instead. Detects new Uniswap V3 pool creations on Ethereum/Base/Arbitrum/Optimism (same factory address on all four, deployed via CREATE2), then — since Covalent has no notion of a token's linked social/website presence — cross-checks each one against DexScreener's free public API for that specific compound condition from the spec ("launch + active social presence"). Read the file's header comment before trusting this one; it needs a real run to confirm the field names and confirm the noise level is reasonable.
+
+**Sources checked and stubbed** ([sources/stubs.ts](./apps/core/src/agents/job-scout/sources/stubs.ts)) — each needs a decision from you, or genuinely has nothing to poll:
+- **X/Twitter** — needs a *paid* API tier (free tier doesn't cover search). Skipped per addendum; revisit if the free sources prove insufficient.
+- **LinkedIn** — no public API; scraping violates their ToS and risks the account it runs from. Skipped per addendum.
+- **Wellfound (AngelList)** — checked: no public API or RSS exists, only paid third-party HTML scrapers (Apify) — same ToS/fragility risk profile as LinkedIn. Not built without an explicit go-ahead given that risk.
+- **Turing / micro1** — checked both: neither has discrete listings at all, just a "create a profile, get matched later" application funnel. Nothing here to poll or de-dup against — if you're not already signed up to either, that's a one-time manual action, not something to automate.
 
 Wiring in a real source later is just implementing the `JobSource` interface in `types.ts` and adding it to `ALL_SOURCES` in `index.ts` — nothing else in the pipeline changes.
 
-**How matching works** (see [filter.ts](./apps/core/src/agents/job-scout/filter.ts)): role classification checks the listing's **title + tags only**, not the full description — an early version matched almost every listing because generic words like "developer" show up somewhere in nearly any job description, even unrelated ones. This trades some recall (a role worded unusually in its title might get missed) for far fewer false positives. Expect it to still be imperfect — that's what the Claude-based upgrade mentioned in SPEC.md is for.
+**How matching works** (see [filter.ts](./apps/core/src/agents/job-scout/filter.ts)): role classification checks the listing's **title + tags only**, not the full description — an early version matched almost every listing because generic words like "developer" show up somewhere in nearly any job description, even unrelated ones. This trades some recall (a role worded unusually in its title might get missed) for far fewer false positives. Expect it to still be imperfect — that's what the Claude-based upgrade mentioned in SPEC.md is for. A source can also set `remote: true/false` directly (trusted over the text scan — useful when a listing never bothers to restate "remote") or `forcedRoleCategory` to skip keyword matching entirely (used by Mercor and the on-chain source, where every listing belongs to one category regardless of its title).
 
 **Pay floor**: private feed excludes anything under $10/hr (flags $15/hr+ as 🔥 high priority); co-founder/ambassador/partnership leads skip the pay floor entirely per spec. The public feed's "looser pay floor" isn't a number the spec gave — it's currently set to $0 (still excludes explicitly-unpaid postings). Tune both in `PRIVATE_FEED_OPTIONS`/`PUBLIC_FEED_OPTIONS` in `filter.ts`.
 

@@ -30,7 +30,11 @@ const ROLE_KEYWORDS: Array<[RoleCategory, RegExp]> = [
  * title is what the poster chose to call the role, which is a far more
  * reliable signal than words appearing anywhere in a page of prose.
  */
-function classifyRole(raw: Pick<RawListing, "title" | "tags">): RoleCategory | undefined {
+function classifyRole(
+  raw: Pick<RawListing, "title" | "tags" | "forcedRoleCategory">
+): RoleCategory | undefined {
+  if (raw.forcedRoleCategory) return raw.forcedRoleCategory;
+
   const text = [raw.title, ...(raw.tags ?? [])].join(" ");
   for (const [category, pattern] of ROLE_KEYWORDS) {
     if (pattern.test(text)) return category;
@@ -38,10 +42,12 @@ function classifyRole(raw: Pick<RawListing, "title" | "tags">): RoleCategory | u
   return undefined;
 }
 
-function isRemote(searchText: string): boolean {
-  // Both current sources (RemoteOK, WeWorkRemotely) are remote-only boards by
-  // construction, but this guards future non-remote-focused sources too.
-  return /\bremote\b/i.test(searchText);
+function isRemote(raw: Pick<RawListing, "remote" | "searchText">): boolean {
+  // Prefer an authoritative flag from the source (an API's own remote=true
+  // filter, or a platform that's remote-only by design) over guessing from
+  // text — a listing's own text won't always bother restating "remote".
+  if (raw.remote !== undefined) return raw.remote;
+  return /\bremote\b/i.test(raw.searchText);
 }
 
 export interface FilterOptions {
@@ -71,7 +77,7 @@ export const PUBLIC_FEED_OPTIONS: FilterOptions = {
  * priority.
  */
 export function applyFilters(raw: RawListing, options: FilterOptions): MatchedListing | undefined {
-  if (!isRemote(raw.searchText)) return undefined;
+  if (!isRemote(raw)) return undefined;
 
   const roleCategory = classifyRole(raw);
   if (!roleCategory) return undefined; // doesn't match any role we're watching for

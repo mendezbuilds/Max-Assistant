@@ -8,6 +8,8 @@ const ROLE_LABELS: Record<MatchedListing["roleCategory"], string> = {
   ambassador: "Ambassador Program",
   partnerships: "Partnerships",
   "co-founder": "Co-Founder Opportunity",
+  "ai-training-rlhf": "AI Training / RLHF",
+  "on-chain-lead": "On-Chain Signal",
   other: "Other",
 };
 
