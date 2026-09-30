@@ -22,14 +22,49 @@
 }
 
 .max-core {
-  --max-glow: rgba(148, 163, 184, 0.45);
+  /* Muted blue-gray, dimmer than the agent nodes, not brighter — confirmed exact values. */
+  --max-glow: rgba(90, 180, 180, 0.3);
   animation: max-morph 9s ease-in-out infinite;
-  box-shadow: 0 0 30px 4px rgba(100, 116, 139, 0.25);
+  box-shadow: 0 0 16px 5px var(--max-glow), inset -7px -7px 14px rgba(0, 0, 0, 0.4);
   transition: box-shadow 0.4s ease;
 }
 
 .max-core.speaking {
   animation: max-speaking 0.9s ease-in-out infinite;
+}
+
+/* Call mode "listening" — a calm, steady attentive pulse, deliberately
+   distinct from both the idle morph (too subtle to read as "actively
+   listening") and .speaking (fast/erratic, reads as MAX talking, not
+   Mendez). Keeps the slow organic morph running underneath (same
+   max-morph animation) and layers a gentle outward ring pulse on top —
+   different property (box-shadow) so the two animations don't conflict. */
+@keyframes max-listening {
+  0%, 100% { box-shadow: 0 0 18px 4px var(--max-glow), 0 0 0 0 rgba(127, 217, 216, 0.35); }
+  50%      { box-shadow: 0 0 26px 7px var(--max-glow), 0 0 0 10px rgba(127, 217, 216, 0); }
+}
+.max-core.listening {
+  animation: max-morph 9s ease-in-out infinite, max-listening 2.2s ease-in-out infinite;
+}
+
+/* "Thinking" dots shown next to MAX's label while a call turn is being
+   processed — a brief state, but should show *something* rather than a
+   dead pause between listening and speaking. */
+@keyframes thinking-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40%           { opacity: 1; transform: translateY(-2px); }
+}
+.thinking-dot {
+  animation: thinking-dot 1.1s ease-in-out infinite;
+}
+
+/* Call bar phase indicator dot. */
+@keyframes call-dot-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.85); }
+  50%      { opacity: 1; transform: scale(1.15); }
+}
+.call-dot {
+  animation: call-dot-pulse 1s ease-in-out infinite;
 }
 
 /* Radar sweep — a rotating conic-gradient wedge reaching the outer ring radius. */
@@ -40,23 +75,19 @@
 
 .radar-sweep {
   animation: radar-sweep 6s linear infinite;
-  background: conic-gradient(from 0deg, rgba(56, 189, 248, 0.22) 0deg, rgba(56, 189, 248, 0) 55deg, rgba(56, 189, 248, 0) 360deg);
+  /* ~45deg wide — wide enough to read as a moving sweep, narrow enough not
+     to dominate the orbit as a giant pie-slice (a 90deg version, tried
+     earlier, was too wide once sized to reach the outer ring). */
+  background: conic-gradient(from 0deg, rgba(127, 217, 216, 0.4) 0deg, rgba(127, 217, 216, 0.14) 22deg, rgba(127, 217, 216, 0) 45deg, rgba(127, 217, 216, 0) 360deg);
   border-radius: 9999px;
 }
 
-/* ---------- Orbit rings ---------- */
+/* ---------- Orbit nodes (travel via offset-path, set inline per-node in AgentNode.tsx — this keyframe just drives offset-distance) ---------- */
 
-@keyframes orbit-cw {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+@keyframes orbit-travel {
+  from { offset-distance: 0%; }
+  to   { offset-distance: 100%; }
 }
-@keyframes orbit-ccw {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(-360deg); }
-}
-
-.orbit-ring-cw { animation-name: orbit-cw; animation-timing-function: linear; animation-iteration-count: infinite; }
-.orbit-ring-ccw { animation-name: orbit-ccw; animation-timing-function: linear; animation-iteration-count: infinite; }
 
 /* Node glow when active/has an unread finding. */
 @keyframes node-glow {
@@ -67,23 +98,32 @@
   animation: node-glow 2.2s ease-in-out infinite;
 }
 
-/* ---------- Starfield (static texture, not animated) ---------- */
+/* ---------- Deep space background ---------- */
 
-.starfield {
-  background-image:
-    radial-gradient(1.5px 1.5px at 10% 20%, rgba(255,255,255,0.55), transparent),
-    radial-gradient(1px 1px at 25% 65%, rgba(255,255,255,0.35), transparent),
-    radial-gradient(2px 2px at 40% 15%, rgba(255,255,255,0.5), transparent),
-    radial-gradient(1px 1px at 55% 80%, rgba(255,255,255,0.3), transparent),
-    radial-gradient(1.5px 1.5px at 70% 35%, rgba(255,255,255,0.45), transparent),
-    radial-gradient(1px 1px at 85% 60%, rgba(255,255,255,0.3), transparent),
-    radial-gradient(2px 2px at 92% 25%, rgba(255,255,255,0.5), transparent),
-    radial-gradient(1px 1px at 15% 90%, rgba(255,255,255,0.3), transparent),
-    radial-gradient(1.5px 1.5px at 60% 55%, rgba(255,255,255,0.4), transparent),
-    radial-gradient(1px 1px at 33% 40%, rgba(255,255,255,0.25), transparent),
-    radial-gradient(1.5px 1.5px at 78% 85%, rgba(255,255,255,0.4), transparent),
-    radial-gradient(1px 1px at 5% 50%, rgba(255,255,255,0.3), transparent);
-  background-repeat: no-repeat;
+.starfield-bg {
+  /* Dark blue-gray, not pure black — darkened twice more per feedback. */
+  background-color: #010204;
+}
+
+.twinkle-star {
+  position: absolute;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.85);
+  animation-name: star-twinkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+@keyframes star-twinkle {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 1; }
+}
+
+/* A handful of larger, brighter "distant star" points near the edges, with a soft glow — static (not twinkling), to read as more prominent against the regular field. */
+.bright-star {
+  position: absolute;
+  border-radius: 9999px;
+  background: rgba(226, 240, 255, 0.95);
+  box-shadow: 0 0 8px 2px rgba(180, 210, 255, 0.5);
 }
 
 /* ---------- Detail screen (terminal) ---------- */
@@ -133,9 +173,11 @@
 @media (prefers-reduced-motion: reduce) {
   .max-core,
   .radar-sweep,
-  .orbit-ring-cw,
-  .orbit-ring-ccw,
-  .node-active {
+  .node-active,
+  .twinkle-star,
+  .max-core.listening,
+  .thinking-dot,
+  .call-dot {
     animation: none !important;
   }
 }

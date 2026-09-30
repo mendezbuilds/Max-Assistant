@@ -6,11 +6,17 @@ import { StatsRow } from "./StatsRow";
 import { AlertBanner } from "./AlertBanner";
 import { QuickChips } from "./QuickChips";
 import { OrbitView } from "./OrbitView";
+import { Starfield } from "./Starfield";
 import { AgentDetailScreen } from "./AgentDetailScreen";
 import { SidePanel } from "./SidePanel";
 import { CommandBar } from "./CommandBar";
+import { CallBar } from "./CallBar";
 import { BottomStatusStrip } from "./BottomStatusStrip";
+import { DegenDashboard } from "../degen-hunter/DegenDashboard";
+import { Toaster } from "./Toaster";
+import { useCallMode } from "./useCallMode";
 import { getAgentVisual } from "@/lib/hq-config";
+import type { AgentVisual } from "@/lib/hq-config";
 import type { AgentData, StatsData } from "./types";
 
 const POLL_MS = 15_000;
@@ -23,17 +29,24 @@ interface ZoomTransition {
   containerHeight: number;
 }
 
-function speak(text: string, onStart: () => void, onEnd: () => void) {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+/**
+ * Plays a real Gemini TTS clip via an actual <audio> element, with the
+ * talking-pulse animation tied to its genuine `play`/`ended`/`error`
+ * events — not a fixed timer guessing at speech duration, and not the
+ * browser's own SpeechSynthesis (which this replaces): that read the text
+ * client-side with no connection to what MAX actually said or how long the
+ * *real* generated speech runs for.
+ */
+function playMaxVoice(audioDataUrl: string | null, onStart: () => void, onEnd: () => void) {
+  if (!audioDataUrl) {
     onEnd();
     return;
   }
-  window.speechSynthesis.cancel();
-  const utter = new SpeechSynthesisUtterance(text);
-  utter.onstart = onStart;
-  utter.onend = onEnd;
-  utter.onerror = onEnd;
-  window.speechSynthesis.speak(utter);
+  const audio = new Audio(audioDataUrl);
+  audio.addEventListener("play", onStart);
+  audio.addEventListener("ended", onEnd);
+  audio.addEventListener("error", onEnd);
+  audio.play().catch(onEnd);
 }
 
 export function HqDashboard({
@@ -45,13 +58,14 @@ export function HqDashboard({
 }) {
   const [agents, setAgents] = useState(initialAgents);
   const [stats, setStats] = useState<StatsData | null>(initialStats);
-  const [panelMode, setPanelMode] = useState<"schedule" | "activity" | null>(null);
+  const [panelMode, setPanelMode] = useState<"schedule" | "activity" | "alerts" | null>(null);
   const [panelClosing, setPanelClosing] = useState(false);
   const [zoomTransition, setZoomTransition] = useState<ZoomTransition | null>(null);
   const [zoomedAgentKey, setZoomedAgentKey] = useState<string | null>(null);
   const [speaking, setSpeaking] = useState(false);
+  const [maxReply, setMaxReply] = useState<{ text: string; error: boolean } | null>(null);
 
-  const nodeRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const nodeRefs = useRef<Record<string, HTMLElement | null>>({});
   const chatHandlerRef = useRef<((text: string) => Promise<void>) | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -65,7 +79,7 @@ export function HqDashboard({
     return () => clearInterval(interval);
   }, []);
 
-  const registerNodeRef = useCallback((key: string, el: HTMLDivElement | null) => {
+  const registerNodeRef = useCallback((key: string, el: HTMLElement | null) => {
     nodeRefs.current[key] = el;
   }, []);
 
@@ -96,17 +110,27 @@ export function HqDashboard({
     setZoomedAgentKey(null);
   }, []);
 
+  // Call mode's transcribed turns flow into the exact same /api/max/command
+  // pipeline as typed commands (see useCallMode.ts) — beginZoom/setMaxReply
+  // are shared with the typed-command path below rather than duplicated.
+  const { active: callActive, phase: callPhase, error: callError, startCall, endCall } = useCallMode({
+    onZoom: beginZoom,
+    onReply: setMaxReply,
+  });
+
   const handleMaxCommand = useCallback(
     (text: string) => {
+      setMaxReply(null);
       fetch("/api/max/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       })
         .then((r) => r.json())
-        .then((body: { spokenText: string; targetAgentKey: string | null }) => {
-          speak(
-            body.spokenText,
+        .then((body: { spokenText: string; targetAgentKey: string | null; audioDataUrl: string | null; error: boolean }) => {
+          setMaxReply({ text: body.spokenText, error: body.error });
+          playMaxVoice(
+            body.audioDataUrl,
             () => setSpeaking(true),
             () => setSpeaking(false)
           );
@@ -114,7 +138,13 @@ export function HqDashboard({
             window.setTimeout(() => beginZoom(body.targetAgentKey!), 900);
           }
         })
-        .catch(() => {});
+        // A network-level failure (fetch itself never completing) is a real
+        // error state too, not just a Gemini-side one the route already
+        // handles — it needs the same visible "MAX couldn't respond"
+        // treatment instead of just silently going nowhere.
+        .catch(() => {
+          setMaxReply({ text: "MAX couldn't respond — try again.", error: true });
+        });
     },
     [beginZoom]
   );
@@ -123,7 +153,7 @@ export function HqDashboard({
     chatHandlerRef.current?.(text);
   }, []);
 
-  const openPanel = useCallback((mode: "schedule" | "activity") => {
+  const openPanel = useCallback((mode: "schedule" | "activity" | "alerts") => {
     setPanelClosing(false);
     setPanelMode(mode);
   }, []);
@@ -137,14 +167,26 @@ export function HqDashboard({
   }, []);
 
   return (
-    <div className="relative flex min-h-screen flex-col overflow-x-hidden bg-[#05070c] text-slate-200">
+    // h-screen + overflow-hidden (not min-h-screen) — min-h-screen lets the
+    // page grow taller than the viewport when its content wants more room
+    // than that, which is exactly what forced page-level scrolling once
+    // the orbit got bigger. Capping the root at exactly one viewport tall
+    // makes the flex-1 orbit area below get a *fixed* height budget, which
+    // OrbitView now actually measures and fits within (see its own
+    // ResizeObserver), instead of only ever sizing itself from width.
+    <div className="starfield-bg relative flex h-screen flex-col overflow-hidden text-slate-200">
+      {/* Full-page background, behind everything — previously scoped to just the orbit's own box, which read as a visibly boxed rectangle instead of a page background. */}
+      <Starfield />
+      <Toaster onZoomAgent={beginZoom} />
       <TitleBar bootedAt={stats?.bootedAt ?? null} online={stats?.coreOnline ?? false} />
       <StatsRow stats={stats} />
       <AlertBanner stats={stats} />
       {!zoomedAgentKey && <QuickChips onOpen={openPanel} />}
 
-      <div ref={contentRef} className="relative flex flex-1 items-center justify-center overflow-hidden py-4">
-        {zoomedAgentKey ? (
+      <div ref={contentRef} className="relative flex flex-1 items-center justify-center overflow-hidden py-1">
+        {zoomedAgentKey === "degen-hunter" ? (
+          <DegenDashboard onBack={handleBackToOrbit} />
+        ) : zoomedAgentKey ? (
           <AgentDetailScreen
             agentKey={zoomedAgentKey}
             onBack={handleBackToOrbit}
@@ -155,9 +197,11 @@ export function HqDashboard({
         ) : (
           <OrbitView
             agents={agents}
-            speaking={speaking}
+            maxState={callActive ? callPhase : speaking ? "speaking" : "idle"}
             onNodeClick={beginZoom}
-            onMaxClick={() => handleMaxCommand("")}
+            // A call is already active — tapping MAX's core mid-call
+            // shouldn't also fire the typed-style empty-text ping.
+            onMaxClick={callActive ? () => {} : () => handleMaxCommand("")}
             registerNodeRef={registerNodeRef}
           />
         )}
@@ -167,19 +211,45 @@ export function HqDashboard({
             rect={zoomTransition.rect}
             containerWidth={zoomTransition.containerWidth}
             containerHeight={zoomTransition.containerHeight}
-            color={getAgentVisual(zoomTransition.key).color}
+            visual={getAgentVisual(zoomTransition.key)}
           />
         )}
       </div>
 
       <BottomStatusStrip stats={stats} />
 
-      <CommandBar
-        mode={zoomedAgentKey ? "agent" : "max"}
-        onMaxCommand={handleMaxCommand}
-        onAgentMessage={handleAgentMessage}
-        onNavigateBack={handleBackToOrbit}
-      />
+      {/*
+        MAX's text reply wasn't shown anywhere before this stage — only
+        spoken via voice, which meant an error state (or any reply, on a
+        machine with no audio) was genuinely invisible. Positioned just
+        above the command bar, matching its own width/alignment.
+      */}
+      {maxReply && !zoomedAgentKey && (
+        <div className="fixed bottom-16 left-0 right-0 z-30 px-4">
+          <div
+            className={`mx-auto max-w-3xl rounded-lg border px-3 py-2 font-mono text-sm backdrop-blur-sm ${
+              maxReply.error
+                ? "border-red-900/60 bg-red-950/40 text-red-400"
+                : "border-jarvis-border/70 bg-slate-950/40 text-jarvis-cyan"
+            }`}
+          >
+            {maxReply.text}
+          </div>
+        </div>
+      )}
+
+      {callActive ? (
+        <CallBar phase={callPhase} onEndCall={endCall} />
+      ) : (
+        <CommandBar
+          mode={zoomedAgentKey ? "agent" : "max"}
+          onMaxCommand={handleMaxCommand}
+          onAgentMessage={handleAgentMessage}
+          onNavigateBack={handleBackToOrbit}
+          onStartCall={startCall}
+          callError={callError}
+        />
+      )}
 
       {panelMode && <SidePanel mode={panelMode} closing={panelClosing} onClose={closePanel} />}
     </div>
@@ -194,26 +264,33 @@ export function HqDashboard({
  * the content area (not viewport-fixed) so it stays scoped to "replacing
  * the orbit view" rather than a page-wide overlay that would ignore the
  * title bar/command bar's screen space.
+ *
+ * Rendered as a solid, fully opaque orb (the same look as the real node,
+ * just bigger) rather than a translucent radial-gradient blob — no
+ * transparency anywhere, at any point in the transition, including the
+ * handoff to the terminal screen: it simply unmounts (the terminal screen
+ * mounts underneath) rather than fading out.
  */
 function ZoomOverlay({
   rect,
   containerWidth,
   containerHeight,
-  color,
+  visual,
 }: {
   rect: { left: number; top: number; width: number; height: number };
   containerWidth: number;
   containerHeight: number;
-  color: string;
+  visual: AgentVisual;
 }) {
   const [grown, setGrown] = useState(false);
+  const Icon = visual.icon;
 
   useEffect(() => {
     const raf = requestAnimationFrame(() => setGrown(true));
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const targetSize = Math.min(containerWidth, containerHeight) * 0.45;
+  const targetSize = Math.min(containerWidth, containerHeight) * 0.5;
 
   const style = grown
     ? {
@@ -221,20 +298,36 @@ function ZoomOverlay({
         top: containerHeight / 2 - targetSize / 2,
         width: targetSize,
         height: targetSize,
-        opacity: 0,
       }
     : {
         left: rect.left,
         top: rect.top,
         width: rect.width,
         height: rect.height,
-        opacity: 1,
       };
 
   return (
     <div
-      className="pointer-events-none absolute z-50 rounded-full transition-all duration-500 ease-in-out"
-      style={{ ...style, background: `radial-gradient(circle, ${color}cc 0%, ${color}22 70%, transparent 100%)` }}
-    />
+      className="pointer-events-none absolute z-50 flex items-center justify-center rounded-full"
+      style={{
+        ...style,
+        transition: "left 0.5s ease-out, top 0.5s ease-out, width 0.5s ease-out, height 0.5s ease-out",
+        // Solid opaque base color (the last, plain-color layer) with
+        // white/black shading layered on top and faded to *transparent*
+        // rather than to a low-alpha version of the node color —
+        // transparent here reveals the opaque base underneath it, not
+        // whatever is behind the orb, so it reads as solid all the way to
+        // its edge. Same technique as AgentNode's own sphere fill.
+        background: `radial-gradient(circle at 32% 28%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 45%), radial-gradient(circle at 68% 78%, rgba(0,0,0,0.4) 0%, rgba(0,0,0,0) 60%), ${visual.color}`,
+        boxShadow: `0 0 50px 10px ${visual.color}55, inset 0 2px 4px rgba(255,255,255,0.35), inset 0 -3px 6px rgba(0,0,0,0.35)`,
+      }}
+    >
+      <Icon
+        size={Math.round(targetSize * 0.32)}
+        stroke={1.5}
+        className="text-white transition-transform duration-500 ease-out"
+        style={{ transform: grown ? "scale(1)" : "scale(0.42)" }}
+      />
+    </div>
   );
 }

@@ -46,7 +46,7 @@ export function createBot(token: string): Bot {
 }
 
 /** Send a message to every registered Telegram chat (usually just Mendez's). This is the "private feed" for agents like job-scout. */
-export async function notify(message: string) {
+export async function notify(message: string, options?: any) {
   if (!bot) {
     console.warn("[telegram] notify() called before the bot was started; skipping:", message);
     return;
@@ -60,7 +60,7 @@ export async function notify(message: string) {
 
   await Promise.all(
     targets.map((t) =>
-      bot!.api.sendMessage(t.chatId, message, { parse_mode: "Markdown" }).catch((err) => {
+      bot!.api.sendMessage(t.chatId, message, { parse_mode: "Markdown", ...options }).catch((err) => {
         console.error(`[telegram] failed to notify chat ${t.chatId}`, err);
       })
     )

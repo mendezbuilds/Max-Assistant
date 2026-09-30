@@ -63,6 +63,15 @@ export const AGENT_REGISTRY: AgentDefinition[] = [
       "Scans inbox against criteria (client mail, urgent/invoice/contract keywords, important domains) and sends a Telegram digest of what matters.",
     phase: 1,
   },
+  {
+    key: "degen-hunter",
+    name: "Degen Hunter",
+    icon: "🔥",
+    description:
+      "Real-time crypto token discovery and monitoring — meme coins, newly launched tokens, low-cap tokens, trending tokens, emerging narratives, unusual market activity. Discovers tokens, analyzes data, assigns risk levels, sends actionable Telegram alerts with two-step PIN-confirmed execution via dedicated burner wallet.",
+    phase: 1,
+  },
+
 
   // Phase 2 — personal ops agents
   {

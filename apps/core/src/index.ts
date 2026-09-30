@@ -15,6 +15,7 @@ import { optionalEnv } from "@max/shared";
 import { createBot, notifyOnBoot, startBot } from "./telegram";
 import { startScheduler } from "./scheduler";
 import { log } from "./logger";
+import { startBot as startDegenHunterBot } from "./agents/degen-hunter/telegram/bot";
 
 async function main() {
   console.log("Starting Max core...");
@@ -32,6 +33,14 @@ async function main() {
   }
 
   startScheduler();
+
+  // Start the dedicated Degen Hunter Telegram bot (uses its own DEGEN_TELEGRAM_BOT_TOKEN)
+  try {
+    startDegenHunterBot();
+    console.log("[degen-hunter-telegram] bot started");
+  } catch (err) {
+    console.warn(`[degen-hunter-telegram] bot failed to start: ${(err as Error).message}`);
+  }
 
   await log("system", "info", "Max core started");
   if (telegramToken) {

@@ -26,18 +26,19 @@ export function TitleBar({ bootedAt, online }: { bootedAt: string | null; online
   const uptimeMs = bootedAt && now !== null ? now - new Date(bootedAt).getTime() : null;
 
   return (
-    <div className="flex items-center justify-between border-b border-slate-800/80 px-4 py-2.5 sm:px-6">
-      <span className="font-mono text-xs font-semibold tracking-[0.2em] text-slate-300 sm:text-sm">
-        MAX_OS <span className="text-slate-600">//</span> MENDEZ_EMPIRE_HQ
+    <div className="flex items-center justify-between border-b border-jarvis-border px-4 py-1.5 sm:px-6">
+      <span className="font-mono text-xs font-semibold tracking-[0.1em] text-jarvis-cyan sm:text-sm">
+        MAX_OS <span className="text-jarvis-dim">//</span> MENDEZ_EMPIRE_HQ
       </span>
-      <div className="flex items-center gap-3 font-mono text-xs text-slate-500">
-        {uptimeMs !== null && <span className="hidden sm:inline">uptime {formatUptime(uptimeMs)}</span>}
+      <div className="flex items-center gap-3 font-mono text-xs text-jarvis-dim uppercase tracking-wider">
+        {/* Only show a real elapsed-time value while genuinely online — an uptime counter next to "OFFLINE" implies the process is still running, which it isn't. */}
+        {uptimeMs !== null && <span className="hidden sm:inline">UPTIME {online ? formatUptime(uptimeMs) : "—"}</span>}
         <span className="flex items-center gap-1.5">
-          <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-emerald-500" : "bg-slate-600"}`} />
-          {online ? "ONLINE" : "OFFLINE"}
+          <span className={`h-1.5 w-1.5 rounded-full shadow-[0_0_8px_currentColor] ${online ? "bg-jarvis-green text-jarvis-green" : "bg-slate-600 text-slate-600"}`} />
+          <span className={online ? "text-jarvis-cyan" : "text-slate-500"}>{online ? "ONLINE" : "OFFLINE"}</span>
         </span>
         <form action="/api/logout" method="POST">
-          <button className="text-slate-600 hover:text-slate-300">log out</button>
+          <button className="text-jarvis-dim hover:text-jarvis-cyan transition-colors">LOG OUT</button>
         </form>
       </div>
     </div>

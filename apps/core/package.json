@@ -11,6 +11,8 @@
   "dependencies": {
     "@max/db": "*",
     "@max/shared": "*",
+    "@solana/web3.js": "^1.99.0",
+    "bs58": "^6.0.0",
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.5",
     "fast-xml-parser": "^4.5.7",

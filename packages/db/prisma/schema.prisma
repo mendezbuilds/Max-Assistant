@@ -69,3 +69,104 @@ model SeenItem {
   @@unique([agentKey, externalId])
   @@index([agentKey])
 }
+
+// ===== DEGEN HUNTER SPECIFIC TABLES =====
+
+// Degen Hunter users - tracks user state and preferences
+model DegenHunterUser {
+  id        Int      @id @default(autoincrement())
+  chatId    String   @unique // Telegram chat ID
+  username  String?
+  // Paper trading wallet balance (in SOL)
+  paperWalletBalance Decimal @default(0)
+  // PIN security (hashed)
+  pinHash   String?  // PBKDF2-SHA256 hashed PIN (salt:hash, see @max/shared's degen-crypto.ts), null if not set
+  // User preferences
+  alertsEnabled      Boolean @default(true)
+  minScoreThreshold  Int     @default(50) // 0-100
+  riskLevelFilter    String? // Comma-separated: "low,medium,high" or JSON array
+  notifyOnNewTokens  Boolean @default(true)
+  lastActive         DateTime @default(now())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+// Degen Hunter wallet - tracks paper trading wallet and transaction history
+model DegenHunterWallet {
+  id              Int      @id @default(autoincrement())
+  chatId          String   @unique // Telegram chat ID
+  publicKey       String?  // Solana public key
+  encryptedKey    String?  // Encrypted private key
+  iv              String?  // Initialization vector for encryption
+  balance         Decimal  @default(0) // Wallet balance in SOL
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// Degen Hunter watchlist - tokens users are watching
+model DegenHunterWatchlist {
+  id        Int      @id @default(autoincrement())
+  chatId    String   // Telegram chat ID
+  tokenAddress String // Token contract address
+  // Durable identity fields — preserved even if market data becomes unavailable
+  tokenName    String?  // Token name at time of watch
+  tokenSymbol  String?  // Token symbol at time of watch
+  tokenChain   String?  // Chain (e.g. "solana")
+  pairAddress  String?  // DEX pair address
+  dexLabel     String?  // DEX name/label (e.g. "Raydium")
+  discoverySource String? // How it was discovered
+  addedAt   DateTime @default(now())
+  @@unique([chatId, tokenAddress])
+  @@index([chatId])
+  @@index([tokenAddress])
+}
+
+// Degen Hunter muted tokens - tokens users have muted alerts for
+model DegenHunterMutedToken {
+  id        Int      @id @default(autoincrement())
+  chatId    String   // Telegram chat ID
+  tokenAddress String // Token contract address
+  mutedAt   DateTime @default(now())
+  @@unique([chatId, tokenAddress])
+  @@index([chatId])
+  @@index([tokenAddress])
+}
+
+// Degen Hunter ignored tokens - tokens users have ignored/hidden
+model DegenHunterIgnoredToken {
+  id        Int      @id @default(autoincrement())
+  chatId    String   // Telegram chat ID
+  tokenAddress String // Token contract address
+  ignoredAt DateTime @default(now())
+  @@unique([chatId, tokenAddress])
+  @@index([chatId])
+  @@index([tokenAddress])
+}
+
+// Degen Hunter real trading position
+model DegenHunterPosition {
+  id           Int      @id @default(autoincrement())
+  chatId       String   // Telegram chat ID
+  tokenAddress String   // Token contract address
+  tokenSymbol  String   // Token symbol (e.g., "BONK")
+  tokenAmount  Decimal  // Amount of tokens held
+  amountSOL    Decimal  // Amount of SOL invested
+  entryPriceUsd Decimal // Token price in USD at time of buy
+  status       String   @default("OPEN") // "OPEN" or "CLOSED"
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  @@index([chatId])
+  @@index([tokenAddress])
+  @@index([status])
+}
+
+// Degen Hunter recent tokens - cache of recently seen tokens for button callbacks
+model DegenHunterRecentToken {
+  id        Int      @id @default(autoincrement())
+  tokenId   String   @unique // Unique token identifier from agent
+  tokenData String   // Full token data as JSON string
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([tokenId])
+}

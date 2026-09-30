@@ -51,6 +51,14 @@ export function startScheduler() {
     await log("system", "info", "heartbeat — Max core is alive");
   });
 
+  // Also fire one immediately on boot, not just on the cron's own next
+  // 15-minute boundary — the dashboard's ONLINE/OFFLINE indicator reads
+  // straight off heartbeat freshness (see getStats() in the dashboard),
+  // so without this, starting core (including via MAX's own start-core
+  // command) could leave the indicator showing OFFLINE for up to 15
+  // minutes despite core genuinely being up.
+  log("system", "info", "heartbeat — Max core is alive").catch(() => {});
+
   // Job boards don't move fast enough to justify polling more often than this.
   cron.schedule("*/30 * * * *", () => runIfEnabled("job-scout", AGENT_RUNNERS["job-scout"]));
 
@@ -63,6 +71,9 @@ export function startScheduler() {
   // WL windows can be just as tight as testnet/airdrop ones — same interval
   // as alpha-scout, same judgment-call reasoning.
   cron.schedule("*/20 * * * *", () => runIfEnabled("wl-hunter", AGENT_RUNNERS["wl-hunter"]));
+
+  // Degen Hunter token discovery - every 20 minutes for frequent crypto opportunities
+  cron.schedule("*/20 * * * *", () => runIfEnabled("degen-hunter", AGENT_RUNNERS["degen-hunter"]));
 
   setInterval(checkManualTriggers, 10_000);
 
