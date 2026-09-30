@@ -3,7 +3,8 @@ import { prisma } from "@max/db";
 import { resolveDegenOwnerChatId } from "@/lib/degen-identity";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
-import { decryptPrivateKey, verifyPin } from "@max/shared";
+import { decryptPrivateKey, verifyPinWithLockout } from "@max/shared";
+import { pinRejectionResponse } from "@/lib/degen-pin";
 
 const SOLANA_RPC_ENDPOINT = process.env.SOLANA_RPC_ENDPOINT || "https://api.mainnet-beta.solana.com";
 const connection = new Connection(SOLANA_RPC_ENDPOINT, "confirmed");
@@ -52,9 +53,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const user = await prisma.degenHunterUser.findUnique({ where: { chatId } });
-  if (!user?.pinHash || !verifyPin(pin, user.pinHash)) {
-    return NextResponse.json({ error: "Incorrect PIN" }, { status: 403 });
+  const pinCheck = await verifyPinWithLockout(chatId, pin);
+  if (!pinCheck.ok) {
+    return pinRejectionResponse(pinCheck);
   }
 
   const wallet = await prisma.degenHunterWallet.findUnique({ where: { chatId } });

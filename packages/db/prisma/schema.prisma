@@ -81,6 +81,13 @@ model DegenHunterUser {
   paperWalletBalance Decimal @default(0)
   // PIN security (hashed)
   pinHash   String?  // PBKDF2-SHA256 hashed PIN (salt:hash, see @max/shared's degen-crypto.ts), null if not set
+  // PIN brute-force lockout — see @max/shared's verifyPinWithLockout(), the
+  // single entry point every PIN-gated action (bot + dashboard) goes
+  // through. Shared across ALL PIN-gated actions for this user, not
+  // per-action, so trying a guess via a different endpoint doesn't buy
+  // extra attempts.
+  pinFailedAttempts Int      @default(0)
+  pinLockedUntil    DateTime?
   // User preferences
   alertsEnabled      Boolean @default(true)
   minScoreThreshold  Int     @default(50) // 0-100

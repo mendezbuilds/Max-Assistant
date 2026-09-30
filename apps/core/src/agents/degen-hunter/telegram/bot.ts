@@ -9,7 +9,7 @@ import { DegenToken } from "../types";
 import { generateTokenAlert } from "../index";
 import { createHmac, timingSafeEqual, randomBytes, pbkdf2Sync, createHash } from "crypto";
 import { createBurnerWallet, getSolBalance, exportPrivateKey, executeJupiterSwap } from "../lib/solanaTrading";
-import { hashPin, verifyPin } from "@max/shared";
+import { hashPin, verifyPinWithLockout, type PinCheckResult } from "@max/shared";
 
 
 const shortIdMap = new Map<string, string>();
@@ -408,9 +408,9 @@ async function handleTextMessage(ctx: any) {
     const amountOrPercent = parts[2];
     
     const pin = text;
-    const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-    if (!userRecord?.pinHash || !verifyPin(pin, userRecord.pinHash)) {
-      await ctx.reply("❌ *Incorrect PIN.* Trade cancelled.", { parse_mode: "Markdown" });
+    const pinCheck = await verifyPinWithLockout(chatId, pin);
+    if (!pinCheck.ok) {
+      await replyPinRejection(ctx, pinCheck, "❌ *Incorrect PIN.* Trade cancelled.");
       userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
       return;
     }
@@ -440,9 +440,10 @@ async function handleTextMessage(ctx: any) {
       return;
     }
     const pin = text;
-    const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-    if (!userRecord?.pinHash || !verifyPin(pin, userRecord.pinHash)) {
-      await ctx.reply("❌ *Incorrect PIN.* Please try again:", { parse_mode: "Markdown" });
+    const pinCheck = await verifyPinWithLockout(chatId, pin);
+    if (!pinCheck.ok) {
+      await replyPinRejection(ctx, pinCheck, "❌ *Incorrect PIN.* Please try again:");
+      if (pinCheck.reason === "locked" || (pinCheck.reason === "incorrect" && pinCheck.justLocked)) userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
       return;
     }
     // Correct — execute deposit
@@ -468,9 +469,10 @@ async function handleTextMessage(ctx: any) {
       return;
     }
     const pin = text;
-    const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-    if (!userRecord?.pinHash || !verifyPin(pin, userRecord.pinHash)) {
-      await ctx.reply("❌ *Incorrect PIN.* Please try again:", { parse_mode: "Markdown" });
+    const pinCheck = await verifyPinWithLockout(chatId, pin);
+    if (!pinCheck.ok) {
+      await replyPinRejection(ctx, pinCheck, "❌ *Incorrect PIN.* Please try again:");
+      if (pinCheck.reason === "locked" || (pinCheck.reason === "incorrect" && pinCheck.justLocked)) userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
       return;
     }
     userStates.set(chatId, { ...userState, awaitingPinFor: undefined, pendingWithdrawAmount: undefined });
@@ -512,9 +514,10 @@ async function handleTextMessage(ctx: any) {
 
   if (awaitingPinFor === "change_pin_old") {
     // Verifying old PIN before allowing change
-    const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-    if (!userRecord?.pinHash || !verifyPin(text, userRecord.pinHash)) {
-      await ctx.reply("❌ *Incorrect PIN.* Please try again:", { parse_mode: "Markdown" });
+    const pinCheck = await verifyPinWithLockout(chatId, text);
+    if (!pinCheck.ok) {
+      await replyPinRejection(ctx, pinCheck, "❌ *Incorrect PIN.* Please try again:");
+      if (pinCheck.reason === "locked" || (pinCheck.reason === "incorrect" && pinCheck.justLocked)) userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
       return;
     }
     userStates.set(chatId, { ...userState, awaitingPinFor: "change_pin_new" });
@@ -528,9 +531,10 @@ async function handleTextMessage(ctx: any) {
       await ctx.reply("❌ *Invalid PIN.* PIN must be 4–8 digits. Please try again:", { parse_mode: "Markdown" });
       return;
     }
-    const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-    if (!userRecord?.pinHash || !verifyPin(text, userRecord.pinHash)) {
-      await ctx.reply("❌ *Incorrect PIN.* Please try again:", { parse_mode: "Markdown" });
+    const pinCheck = await verifyPinWithLockout(chatId, text);
+    if (!pinCheck.ok) {
+      await replyPinRejection(ctx, pinCheck, "❌ *Incorrect PIN.* Please try again:");
+      if (pinCheck.reason === "locked" || (pinCheck.reason === "incorrect" && pinCheck.justLocked)) userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
       return;
     }
 
@@ -620,6 +624,31 @@ function requireOwner() {
     }
     await next();
   };
+}
+
+/**
+ * Sends the appropriate rejection reply for a failed verifyPinWithLockout()
+ * result — every one of this file's 9 PIN-entry points calls this instead
+ * of composing its own message, so the lockout case (new behavior) reads
+ * identically everywhere, while each site's own "incorrect PIN" wording is
+ * still passed in and preserved.
+ */
+async function replyPinRejection(ctx: any, result: Exclude<PinCheckResult, { ok: true }>, incorrectMessage: string): Promise<void> {
+  if (result.reason === "locked") {
+    await ctx.reply(
+      `🔒 *Too many incorrect PIN attempts.*\n\nTry again in ${result.retryInMinutes} minute(s).`,
+      { parse_mode: "Markdown" }
+    );
+  } else if (result.reason === "incorrect" && result.justLocked) {
+    // This IS the attempt that triggered the lockout — say so now, not
+    // just on the next attempt after the fact.
+    await ctx.reply(
+      `🔒 *Too many incorrect PIN attempts.*\n\nYour account is now locked for 15 minutes.`,
+      { parse_mode: "Markdown" }
+    );
+  } else {
+    await ctx.reply(incorrectMessage, { parse_mode: "Markdown" });
+  }
 }
 
 // Setup all bot handlers
@@ -1187,15 +1216,15 @@ async function handleDeposit(ctx: any) {
     }
 
     // Verify PIN
-    const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-    if (!userRecord || !userRecord.pinHash || !verifyPin(pin, userRecord.pinHash)) {
-      await ctx.reply(
-        `*❌ Incorrect PIN*\n\n` +
-        `Your PIN is incorrect.\n\n` +
-        `Please try again with your 4-8 digit PIN.`,
-        { parse_mode: "Markdown" }
+    const pinCheck = await verifyPinWithLockout(chatId, pin);
+    if (!pinCheck.ok) {
+      await replyPinRejection(
+        ctx,
+        pinCheck,
+        `*❌ Incorrect PIN*\n\nYour PIN is incorrect.\n\nPlease try again with your 4-8 digit PIN.`
       );
-      // Keep waiting for PIN
+      if (pinCheck.reason === "locked" || (pinCheck.reason === "incorrect" && pinCheck.justLocked)) userStates.set(chatId, { ...userState, awaitingPinFor: undefined, pendingDepositAmount: undefined });
+      // Otherwise keep waiting for PIN
       return;
     }
 
@@ -1349,15 +1378,15 @@ async function handleWithdraw(ctx: any) {
     }
 
     // Verify PIN
-    const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-    if (!userRecord || !userRecord.pinHash || !verifyPin(pin, userRecord.pinHash)) {
-      await ctx.reply(
-        `*❌ Incorrect PIN*\n\n` +
-        `Your PIN is incorrect.\n\n` +
-        `Please try again with your 4-8 digit PIN.`,
-        { parse_mode: "Markdown" }
+    const pinCheck = await verifyPinWithLockout(chatId, pin);
+    if (!pinCheck.ok) {
+      await replyPinRejection(
+        ctx,
+        pinCheck,
+        `*❌ Incorrect PIN*\n\nYour PIN is incorrect.\n\nPlease try again with your 4-8 digit PIN.`
       );
-      // Keep waiting for PIN
+      if (pinCheck.reason === "locked" || (pinCheck.reason === "incorrect" && pinCheck.justLocked)) userStates.set(chatId, { ...userState, awaitingPinFor: undefined, pendingWithdrawAmount: undefined });
+      // Otherwise keep waiting for PIN
       return;
     }
 
@@ -1563,15 +1592,15 @@ async function handleExportKey(ctx: any) {
     }
 
     // Verify PIN
-    const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-    if (!userRecord || !userRecord.pinHash || !verifyPin(pin, userRecord.pinHash)) {
-      await ctx.reply(
-        `*❌ Incorrect PIN*\n\n` +
-        `Your PIN is incorrect.\n\n` +
-        `Please try again with your 4-8 digit PIN.`,
-        { parse_mode: "Markdown" }
+    const pinCheck = await verifyPinWithLockout(chatId, pin);
+    if (!pinCheck.ok) {
+      await replyPinRejection(
+        ctx,
+        pinCheck,
+        `*❌ Incorrect PIN*\n\nYour PIN is incorrect.\n\nPlease try again with your 4-8 digit PIN.`
       );
-      // Keep waiting for PIN
+      if (pinCheck.reason === "locked" || (pinCheck.reason === "incorrect" && pinCheck.justLocked)) userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
+      // Otherwise keep waiting for PIN
       return;
     }
 
@@ -1711,15 +1740,15 @@ async function handlePin(ctx: any) {
     }
     else if (userState.awaitingPinFor === "change_pin_old") {
       // User provided old PIN for change, now ask for new one
-      const userRecord = await safePrisma.degenHunterUser.findUnique?.({ where: { chatId } });
-      if (!userRecord || !userRecord.pinHash || !verifyPin(pin, userRecord.pinHash)) {
-        await ctx.reply(
-          `*❌ Incorrect PIN*\n\n` +
-          `Your current PIN is incorrect.\n\n` +
-          `Please try again with your current 4-8 digit PIN.`,
-          { parse_mode: "Markdown" }
+      const pinCheck = await verifyPinWithLockout(chatId, pin);
+      if (!pinCheck.ok) {
+        await replyPinRejection(
+          ctx,
+          pinCheck,
+          `*❌ Incorrect PIN*\n\nYour current PIN is incorrect.\n\nPlease try again with your current 4-8 digit PIN.`
         );
-        // Keep waiting for old PIN
+        if (pinCheck.reason === "locked" || (pinCheck.reason === "incorrect" && pinCheck.justLocked)) userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
+        // Otherwise keep waiting for old PIN
         return;
       }
 

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@max/db";
 import { resolveDegenOwnerChatId } from "@/lib/degen-identity";
-import { hashPin, verifyPin } from "@max/shared";
+import { hashPin, verifyPinWithLockout } from "@max/shared";
+import { pinRejectionResponse } from "@/lib/degen-pin";
 
 /**
  * POST /api/agents/degen-hunter/pin
@@ -26,13 +27,14 @@ export async function POST(req: NextRequest) {
   }
 
   const user = await prisma.degenHunterUser.findUnique({ where: { chatId } });
-  
+
   if (user?.pinHash) {
     if (!oldPin) {
       return NextResponse.json({ error: "Current PIN is required to change it" }, { status: 400 });
     }
-    if (!verifyPin(oldPin, user.pinHash)) {
-      return NextResponse.json({ error: "Incorrect current PIN" }, { status: 403 });
+    const pinCheck = await verifyPinWithLockout(chatId, oldPin);
+    if (!pinCheck.ok) {
+      return pinRejectionResponse(pinCheck);
     }
   }
 

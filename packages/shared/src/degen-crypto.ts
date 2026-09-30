@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { requireEnv } from "./env";
+import { prisma } from "@max/db";
 
 /**
  * Single source of truth for Degen Hunter's wallet encryption and PIN
@@ -89,4 +90,83 @@ export function verifyPin(pin: string, storedHash: string): boolean {
     console.error("[degen-crypto] Error verifying PIN:", error);
     return false;
   }
+}
+
+// ─── PIN brute-force lockout ──────────────────────────────────────────────────
+
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+export type PinCheckResult =
+  | { ok: true }
+  | { ok: false; reason: "no_user" }
+  | { ok: false; reason: "no_pin_set" }
+  | { ok: false; reason: "locked"; retryAt: Date; retryInMinutes: number }
+  | { ok: false; reason: "incorrect"; attemptsRemaining: number; justLocked: boolean };
+
+/**
+ * The single PIN-verification entry point for every PIN-gated Degen Hunter
+ * action — trades, sends, wallet deletion, deposits/withdrawals, PIN
+ * changes, key export — across both the Telegram bot (9 call sites) and
+ * the 4 dashboard API routes that check a PIN. Previously every one of
+ * those ~13 sites called the bare verifyPin() above directly with no
+ * attempt tracking at all: a 4-digit PIN (10,000 combinations) could be
+ * brute-forced with unlimited guesses.
+ *
+ * Failures are tracked on DegenHunterUser, keyed by chatId — the one
+ * identity this whole feature already keys everything on — and are
+ * shared across ALL PIN-gated actions for that user, not counted
+ * separately per action. A per-action counter would let an attacker
+ * rotate through the 13 entry points for 13x the real attempt budget;
+ * one shared counter closes that off. During a lockout, the PIN itself
+ * is never even checked — reason "locked" is returned immediately.
+ */
+export async function verifyPinWithLockout(chatId: string, pin: string): Promise<PinCheckResult> {
+  const user = await prisma.degenHunterUser.findUnique({ where: { chatId } });
+  if (!user) return { ok: false, reason: "no_user" };
+  if (!user.pinHash) return { ok: false, reason: "no_pin_set" };
+
+  const now = new Date();
+  if (user.pinLockedUntil && user.pinLockedUntil > now) {
+    const retryInMinutes = Math.max(1, Math.ceil((user.pinLockedUntil.getTime() - now.getTime()) / 60000));
+    return { ok: false, reason: "locked", retryAt: user.pinLockedUntil, retryInMinutes };
+  }
+
+  const correct = verifyPin(pin, user.pinHash);
+
+  if (correct) {
+    if (user.pinFailedAttempts !== 0 || user.pinLockedUntil !== null) {
+      await prisma.degenHunterUser.update({
+        where: { chatId },
+        data: { pinFailedAttempts: 0, pinLockedUntil: null },
+      });
+    }
+    return { ok: true };
+  }
+
+  const failedAttempts = user.pinFailedAttempts + 1;
+  const justLocked = failedAttempts >= PIN_MAX_ATTEMPTS;
+  const lockedUntil = justLocked ? new Date(now.getTime() + PIN_LOCKOUT_MS) : null;
+
+  await prisma.degenHunterUser.update({
+    where: { chatId },
+    // Reset the counter itself once locked, so the next window after
+    // expiry starts fresh rather than immediately re-locking on attempt 1.
+    data: { pinFailedAttempts: justLocked ? 0 : failedAttempts, pinLockedUntil: lockedUntil },
+  });
+
+  if (justLocked) {
+    // Never log the PIN value itself — only that a lockout occurred.
+    await prisma.activityLog
+      .create({
+        data: {
+          agentKey: "degen-hunter",
+          level: "warn",
+          message: `PIN locked for chatId ${chatId} after ${PIN_MAX_ATTEMPTS} consecutive failed attempts — locked until ${lockedUntil!.toISOString()}`,
+        },
+      })
+      .catch(() => {});
+  }
+
+  return { ok: false, reason: "incorrect", attemptsRemaining: justLocked ? 0 : PIN_MAX_ATTEMPTS - failedAttempts, justLocked };
 }

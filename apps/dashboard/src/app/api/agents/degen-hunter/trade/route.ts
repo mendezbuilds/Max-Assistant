@@ -3,7 +3,8 @@ import { prisma } from "@max/db";
 import { resolveDegenOwnerChatId } from "@/lib/degen-identity";
 import { Keypair, Connection, VersionedTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
-import { decryptPrivateKey, verifyPin } from "@max/shared";
+import { decryptPrivateKey, verifyPinWithLockout } from "@max/shared";
+import { pinRejectionResponse } from "@/lib/degen-pin";
 
 const SOLANA_RPC_ENDPOINT =
   process.env.SOLANA_RPC_ENDPOINT || "https://api.mainnet-beta.solana.com";
@@ -52,10 +53,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "action must be 'buy' or 'sell'" }, { status: 400 });
   }
 
-  // 2. Verify PIN
-  const userRecord = await prisma.degenHunterUser.findUnique({ where: { chatId } });
-  if (!userRecord?.pinHash || !verifyPin(pin, userRecord.pinHash)) {
-    return NextResponse.json({ error: "Incorrect PIN" }, { status: 403 });
+  // 2. Verify PIN (rate-limited — see @max/shared's verifyPinWithLockout)
+  const pinCheck = await verifyPinWithLockout(chatId, pin);
+  if (!pinCheck.ok) {
+    return pinRejectionResponse(pinCheck);
   }
 
   // 3. Load wallet
