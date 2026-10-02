@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { IconSearch, IconRefresh, IconFlame, IconFilter, IconClock, IconAlertTriangle } from "@tabler/icons-react";
 import { TokenCard } from "./TokenCard";
 import { useWatchlist } from "./useWatchlist";
+import { useTradable } from "./useTradable";
 import type { DashboardToken } from "./types";
 
 type ProfileFilter = "all" | "newMeme" | "momentum" | "lowCap" | "trending";
@@ -53,6 +54,31 @@ export function DiscoverView({ onOpenDetails }: { onOpenDetails: (token: Dashboa
   const [age, setAge] = useState<AgeFilter>("all");
   const [lastFetch, setLastFetch] = useState<Date | null>(null);
   const { watched, watch, unwatch } = useWatchlist();
+  // Tokens the owner has ignored (same table the Telegram bot's Ignore button writes): hidden from this list.
+  const [ignored, setIgnored] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    fetch("/api/agents/degen-hunter/ignore")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setIgnored(new Set(d.ignored ?? [])))
+      .catch(() => {});
+  }, []);
+
+  const ignore = async (addr: string) => {
+    setIgnored((prev) => new Set([...prev, addr])); // optimistic
+    const res = await fetch("/api/agents/degen-hunter/ignore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tokenAddress: addr }),
+    }).catch(() => null);
+    if (!res?.ok) {
+      setIgnored((prev) => {
+        const next = new Set(prev);
+        next.delete(addr);
+        return next;
+      });
+    }
+  };
 
   const fetchTokens = useCallback(async () => {
     try {
@@ -78,6 +104,7 @@ export function DiscoverView({ onOpenDetails }: { onOpenDetails: (token: Dashboa
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return tokens.filter(t => {
+      if (ignored.has(t.contractAddress ?? t.tokenId)) return false;
       if (q) {
         const name = (t.name ?? "").toLowerCase();
         const sym = (t.symbol ?? "").toLowerCase();
@@ -88,7 +115,11 @@ export function DiscoverView({ onOpenDetails }: { onOpenDetails: (token: Dashboa
       if (!matchAge(t, age)) return false;
       return true;
     });
-  }, [tokens, search, profile, age]);
+  }, [tokens, search, profile, age, ignored]);
+
+  // Can Jupiter route a buy of the newest tokens right now? (Checked for the first 20 shown: that's the
+  // most recent discoveries, and the lookup is capped to stay inside Jupiter's free rate limit.)
+  const tradable = useTradable(filtered.slice(0, 20).map((t) => t.contractAddress ?? ""));
 
   // Count per profile (for display)
   const profileCounts = useMemo(() => {
@@ -218,8 +249,11 @@ export function DiscoverView({ onOpenDetails }: { onOpenDetails: (token: Dashboa
                 key={token.tokenId ?? token._rowId}
                 token={token}
                 isWatched={isWatched}
+                tradable={token.contractAddress ? tradable[token.contractAddress] : undefined}
                 onDetails={() => onOpenDetails(token)}
+                onBuy={() => onOpenDetails(token)}
                 onWatch={addr ? () => (isWatched ? unwatch(addr) : watch(addr)) : undefined}
+                onIgnore={addr ? () => ignore(addr) : undefined}
               />
             );
           })}

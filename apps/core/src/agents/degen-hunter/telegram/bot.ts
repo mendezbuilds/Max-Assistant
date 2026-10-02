@@ -1,16 +1,127 @@
 // Degen Hunter v1 - Phase 5: Telegram Control Room
 // Dedicated Telegram bot for Degen Hunter (isolated from Max's main bot)
 
-import { Bot, InlineKeyboard } from "grammy";
+import fs from "node:fs";
+import path from "node:path";
+import { Bot, InlineKeyboard, InputFile } from "grammy";
+import { recordSell, getClosedTradeStats, buildTradeCardPng, tradeCaption } from "../lib/positionPnl";
 import { prisma } from "@max/db";
 import { log } from "../../../logger";
 import { runDegenHunter } from "../index";
 import { DegenToken } from "../types";
 import { generateTokenAlert } from "../index";
 import { createHmac, timingSafeEqual, randomBytes, pbkdf2Sync, createHash } from "crypto";
-import { createBurnerWallet, getSolBalance, exportPrivateKey, executeJupiterSwap } from "../lib/solanaTrading";
-import { hashPin, verifyPinWithLockout, type PinCheckResult } from "@max/shared";
+import { createBurnerWallet, getSolBalance, exportPrivateKey, executeJupiterSwap, getTokenDecimals, checkTradable } from "../lib/solanaTrading";
+import { hashPin, verifyPinWithLockout, assessRisk, formatPrice, getTokenHolding, sellAmountRaw, classifyTradeError, MIN_SOL_FOR_FEES, type PinCheckResult } from "@max/shared";
+import { PublicKey } from "@solana/web3.js";
+import { rpcEndpoint, getConnection } from "../lib/rpc";
 
+
+// ─── Secure deletion of sensitive messages ─────────────────────────────────
+// The exported private key is deleted after a short delay. A bare setTimeout
+// isn't enough on its own: a core restart (tsx watch reloads on every save)
+// kills the timer, and a failed delete used to be a console line nobody saw —
+// either way the key stayed in the chat. So: the pending delete is persisted
+// to disk and re-armed on startup, failures are retried, and as a last resort
+// the message is edited to redact the key and the owner is told.
+const PENDING_DELETES_FILE = path.join(
+  path.dirname(process.env.MAX_DB_FILE ?? path.resolve(process.cwd(), "data", "max.db")),
+  "pending-deletes.json"
+);
+/** How long the exported key stays visible before auto-delete. */
+const KEY_MESSAGE_TTL_SECONDS = Math.max(3, Number(process.env.DEGEN_KEY_MESSAGE_TTL_SECONDS) || 5);
+
+interface PendingDelete { chatId: string; messageId: number; deleteAt: number }
+
+function readPendingDeletes(): PendingDelete[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(PENDING_DELETES_FILE, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePendingDeletes(list: PendingDelete[]) {
+  try {
+    fs.writeFileSync(PENDING_DELETES_FILE, JSON.stringify(list));
+  } catch (err) {
+    console.error("[degen-hunter] could not persist pending deletes:", err);
+  }
+}
+
+function removePendingDelete(chatId: string, messageId: number) {
+  writePendingDeletes(readPendingDeletes().filter((p) => !(p.chatId === chatId && p.messageId === messageId)));
+}
+
+async function deleteSensitiveMessage(api: any, chatId: string, messageId: number): Promise<boolean> {
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      await api.deleteMessage(chatId, messageId);
+      return true;
+    } catch (err: any) {
+      // Already gone (e.g. the owner deleted it themselves) — nothing left to protect.
+      if (/message to delete not found/i.test(String(err?.description ?? err?.message))) return true;
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+  // Could not delete. Redact the content instead, and tell the owner.
+  try {
+    await api.editMessageText(chatId, messageId, "🔒 Key hidden. (Auto-delete failed — please delete this message manually.)");
+  } catch { /* nothing more we can do automatically */ }
+  await api
+    .sendMessage(chatId, "⚠️ I couldn't auto-delete the exported key message. Please delete it manually right now.")
+    .catch(() => {});
+  log("degen-hunter-telegram", "error", "Failed to auto-delete the exported private key message — redacted it and asked the owner to delete it");
+  return false;
+}
+
+function armSecureDelete(api: any, entry: PendingDelete) {
+  const wait = Math.max(0, entry.deleteAt - Date.now());
+  setTimeout(async () => {
+    const ok = await deleteSensitiveMessage(api, entry.chatId, entry.messageId);
+    if (ok) removePendingDelete(entry.chatId, entry.messageId);
+  }, wait);
+}
+
+function scheduleSecureDelete(api: any, chatId: string, messageId: number, ms: number) {
+  const entry: PendingDelete = { chatId, messageId, deleteAt: Date.now() + ms };
+  writePendingDeletes([...readPendingDeletes(), entry]);
+  armSecureDelete(api, entry);
+}
+
+/** On startup: delete anything that came due while core was down, re-arm the rest. */
+function resumePendingDeletes(api: any) {
+  for (const entry of readPendingDeletes()) armSecureDelete(api, entry);
+}
+
+// Messages in which the owner types a PIN. Deleted as soon as they arrive so
+// the PIN doesn't sit in the chat history (or on a screen) afterwards.
+const PIN_REPLY_STATES = new Set([
+  "buy_confirm", "sell_confirm", "deposit", "withdraw",
+  "set_pin", "change_pin_old", "change_pin_new", "export_key",
+]);
+
+/**
+ * Deletes the owner's PIN messages right away: free-text replies while the
+ * bot is waiting for a PIN, and "/pin 1234"-style commands. Fire-and-forget —
+ * the handler still reads the text from the update it already holds. Private
+ * chats only (a bot can delete incoming messages there).
+ */
+function scrubPinMessages() {
+  return async (ctx: any, next: () => Promise<void>) => {
+    const text: string | undefined = ctx.message?.text;
+    if (text && ctx.chat?.type === "private") {
+      const awaiting = userStates.get(String(ctx.chat.id))?.awaitingPinFor;
+      const isPinReply = !text.startsWith("/") && !!awaiting && PIN_REPLY_STATES.has(awaiting.split(":")[0]);
+      const isPinCommand = /^\/(pin|change_pin)(@\w+)?\s+\S+/i.test(text);
+      if (isPinReply || isPinCommand) {
+        ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
+      }
+    }
+    await next();
+  };
+}
 
 const shortIdMap = new Map<string, string>();
 
@@ -359,6 +470,40 @@ const MAX_RECENT_TOKENS = 100; // Keep last 100 tokens in memory
 // Cooldown map for private key export (chatId -> timestamp)
 const exportCooldowns = new Map<string, number>();
 
+/**
+ * Token ids look like "solana:<pair>:<address>" — they contain colons — so state
+ * strings such as "custom_buy:<tokenId>" or "buy_confirm:<tokenId>:<amount>" can't
+ * be split on ":" and indexed. (Doing that picked the pair address as the token id,
+ * so custom amounts and PIN-confirmed trades looked up the wrong token.)
+ */
+function stateTail(state: string): string {
+  return state.slice(state.indexOf(":") + 1);
+}
+
+function parseConfirmState(state: string): { action: string; tokenId: string; value: string } {
+  const first = state.indexOf(":");
+  const last = state.lastIndexOf(":");
+  return { action: state.slice(0, first), tokenId: state.slice(first + 1, last), value: state.slice(last + 1) };
+}
+
+/**
+ * Trade handlers are written for button presses: they edit "the message the
+ * button was on". When the flow continues from a typed message (a custom amount,
+ * a PIN) the only message is the owner's own text, which a bot can't edit — and
+ * which may already have been deleted. This wraps the context so those edits are
+ * sent as new messages instead.
+ */
+function asReplyCtx(ctx: any) {
+  return {
+    ...ctx,
+    editMessageText: async (msg: string, extra: any) => ctx.reply(msg, extra),
+    api: Object.assign(Object.create(ctx.api), {
+      editMessageText: (cid: any, _mid: any, text: string, extra: any) => ctx.api.sendMessage(cid, text, extra),
+    }),
+    callbackQuery: { message: { message_id: ctx.message?.message_id } },
+  };
+}
+
 // Initialize the bot
 async function handleTextMessage(ctx: any) {
   const chatId = String(ctx.chat.id);
@@ -376,37 +521,34 @@ async function handleTextMessage(ctx: any) {
   
   // Custom Buy Amount
   if (awaitingPinFor?.startsWith("custom_buy:")) {
-    const tokenId = awaitingPinFor.split(":")[1];
+    const tokenId = stateTail(awaitingPinFor);
     const amount = parseFloat(text);
     if (isNaN(amount) || amount <= 0) {
       await ctx.reply("❌ Invalid amount. Please enter a valid number (e.g. 0.5):", { parse_mode: "Markdown" });
       return;
     }
     userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
-    await handleBuyAmount(ctx, tokenId, chatId, text);
+    await handleBuyAmount(asReplyCtx(ctx), tokenId, chatId, text);
     return;
   }
 
   // Custom Sell Amount
   if (awaitingPinFor?.startsWith("custom_sell:")) {
-    const tokenId = awaitingPinFor.split(":")[1];
+    const tokenId = stateTail(awaitingPinFor);
     const percent = parseFloat(text);
     if (isNaN(percent) || percent <= 0 || percent > 100) {
       await ctx.reply("❌ Invalid percentage. Please enter a number between 1 and 100:", { parse_mode: "Markdown" });
       return;
     }
     userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
-    await handleSellAmount(ctx, tokenId, chatId, text);
+    await handleSellAmount(asReplyCtx(ctx), tokenId, chatId, text);
     return;
   }
 
   // Trade Confirmation via PIN
   if (awaitingPinFor?.startsWith("buy_confirm:") || awaitingPinFor?.startsWith("sell_confirm:")) {
-    const parts = awaitingPinFor.split(":");
-    const action = parts[0];
-    const tokenId = parts[1];
-    const amountOrPercent = parts[2];
-    
+    const { action, tokenId, value: amountOrPercent } = parseConfirmState(awaitingPinFor);
+
     const pin = text;
     const pinCheck = await verifyPinWithLockout(chatId, pin);
     if (!pinCheck.ok) {
@@ -417,14 +559,9 @@ async function handleTextMessage(ctx: any) {
     
     userStates.set(chatId, { ...userState, awaitingPinFor: undefined });
     
-    // Create a mock ctx for the confirm functions since they expect to edit messages
-    const mockCtx = {
-      ...ctx,
-      editMessageText: async (msg: string, extra: any) => ctx.reply(msg, extra),
-      api: ctx.api,
-      callbackQuery: { message: { message_id: ctx.message.message_id } }
-    };
-    
+    // The confirm functions expect to edit a button's message; here there's only the (deleted) PIN message.
+    const mockCtx = asReplyCtx(ctx);
+
     if (action === "buy_confirm") {
       await handleBuyConfirm(mockCtx, tokenId, chatId, amountOrPercent);
     } else {
@@ -565,18 +702,12 @@ async function handleTextMessage(ctx: any) {
       `*🔑 Burner Wallet Private Key*\n\n` +
       `\`${privKey}\`\n\n` +
       `⚠️ *WARNING:* Never share this key. Anyone with this key controls your wallet.\n` +
-      `_This message will self-destruct in 5 seconds._`,
+      `_This message will self-destruct in ${KEY_MESSAGE_TTL_SECONDS} seconds._`,
       { parse_mode: "Markdown" }
     );
 
-    // Auto-delete after 5 seconds
-    setTimeout(async () => {
-      try {
-        await ctx.api.deleteMessage(chatId, sentMsg.message_id);
-      } catch (err) {
-        console.error(`[degen-hunter] Failed to auto-delete key message:`, err);
-      }
-    }, 5000);
+    // Persisted + retried delete (see scheduleSecureDelete)
+    scheduleSecureDelete(ctx.api, chatId, sentMsg.message_id, KEY_MESSAGE_TTL_SECONDS * 1000);
 
     return;
   }
@@ -615,6 +746,10 @@ function requireOwner() {
     }
     if (String(chatId) !== ownerChatId) {
       console.warn(`[degen-hunter-telegram] blocked access from unauthorized chat ${chatId}`);
+      // Channels/groups (e.g. the DEGEN_ALERTS_CHAT_ID alerts channel, where
+      // the bot is an admin and sees every post) are blocked silently — a
+      // "private bot" reply there is just noise posted into the channel.
+      if (ctx.chat && ctx.chat.type !== "private") return;
       if (ctx.chat) {
         await ctx.reply("This bot is private and not available for public use.").catch(() => {});
       } else if (ctx.callbackQuery) {
@@ -657,6 +792,8 @@ function setupBot() {
 
   // Owner-only gate — must run before any command/callback/message handler below.
   bot.use(requireOwner());
+  // Right after the owner gate: delete any PIN the owner types, as it arrives.
+  bot.use(scrubPinMessages());
 
   // Commands
   bot.command("start", handleStart);
@@ -684,6 +821,9 @@ function setupBot() {
   bot.catch((err) => {
     const ctx = err.ctx;
     console.error("[degen-hunter-telegram] unhandled error", err);
+    // Also to the activity feed: the user only ever sees "An error occurred", so
+    // the real cause has to be findable somewhere other than a terminal.
+    log("degen-hunter-telegram", "error", `Unhandled bot error: ${(err.error as Error)?.message ?? String(err.error)}`);
     if (ctx?.callbackQuery?.message) {
       ctx.answerCallbackQuery("An error occurred. Please try again.").catch(() => {});
     } else if (ctx?.message) {
@@ -715,6 +855,9 @@ export function startBot() {
         log("degen-hunter-telegram", "info", `Warmed up ${tokens.length} short IDs for callbacks`);
       })
       .catch((err: any) => console.error("Failed to warm up short IDs:", err));
+
+    // Delete (or re-arm) any exported-key messages left over from before a restart.
+    resumePendingDeletes(bot.api);
 
     bot.start().catch((err) => {
       botStarted = false;
@@ -825,6 +968,23 @@ async function handleStart(ctx: any) {
   // Handles: /start buy_<tokenId>  and  /start watch_<tokenId>
   const startParam: string | undefined = ctx.message?.text?.split(" ")[1];
   if (startParam) {
+    // From the alerts channel's "Open in bot" button: show that token's full
+    // card (with Watch/Buy/etc.) here in the private chat. The payload carries
+    // the 12-char short id (token ids contain ":" which link payloads forbid).
+    if (startParam.startsWith("d_")) {
+      const tokenId = resolveShortId(startParam.slice(2));
+      const token = await getTokenById(tokenId);
+      if (token) {
+        await ctx.reply(generateEnhancedTokenAlert(token), {
+          reply_markup: alertKeyboard(token),
+          parse_mode: "Markdown",
+          link_preview_options: { is_disabled: true },
+        });
+      } else {
+        await ctx.reply("⚠️ *Token not found*\n\nThat token is no longer in the recent feed. Open the Control Room → Alerts to see current ones.", { parse_mode: "Markdown" });
+      }
+      return;
+    }
     if (startParam.startsWith("buy_")) {
       const tokenId = startParam.slice(4);
       const token = await getTokenById(tokenId);
@@ -838,7 +998,7 @@ async function handleStart(ctx: any) {
         await ctx.reply(
           `💰 *Buy ${token.symbol}*\n\n` +
           `*Available Balance:* ${balance.toFixed(4)} SOL\n` +
-          `*Current Price:* $${(token.priceUsd || 0).toFixed(6)}\n\n` +
+          `*Current Price:* ${formatPrice(token.priceUsd ?? 0)}\n\n` +
           `Select amount to buy:`,
           { parse_mode: "Markdown", reply_markup: keyboard }
         );
@@ -859,6 +1019,7 @@ async function handleStart(ctx: any) {
           update: {},
           create: { chatId, tokenAddress: token.contractAddress, tokenSymbol: token.symbol, tokenName: token.name, addedAt: new Date() }
         });
+        await setWatchBaseline(chatId, token.contractAddress, token.priceUsd);
         await ctx.reply(
           `👁 *Added to Watchlist*\n\n*${token.name}* ($${token.symbol}) has been added to your watchlist.`,
           { parse_mode: "Markdown" }
@@ -1065,7 +1226,7 @@ async function handleWatchlist(ctx: any, isEdit: boolean = false) {
         if (resp.ok) {
           const data = await resp.json() as any;
           const pair = data?.pair;
-          if (pair?.priceUsd) livePrice = `$${parseFloat(pair.priceUsd).toFixed(6)}`;
+          if (pair?.priceUsd) livePrice = formatPrice(parseFloat(pair.priceUsd));
         }
       } catch { /* best-effort */ }
     }
@@ -1557,7 +1718,7 @@ async function handleHistory(ctx: any, isEdit: boolean = false) {
     const status = pos.status === "OPEN" ? "🟢 OPEN" : "🔴 CLOSED";
     return `${index + 1}. ${status} *${pos.tokenSymbol}*\n` +
            `   SOL: ${Number(pos.amountSOL).toFixed(4)} SOL\n` +
-           `   Entry: $${Number(pos.entryPriceUsd).toFixed(6)}\n` +
+           `   Entry: ${formatPrice(Number(pos.entryPriceUsd))}\n` +
            `   Date: ${date}`;
   });
 
@@ -1628,18 +1789,12 @@ async function handleExportKey(ctx: any) {
       `*🔑 Burner Wallet Private Key*\n\n` +
       `\`${privKey}\`\n\n` +
       `⚠️ *WARNING:* Never share this key. Anyone with this key controls your funds.\n` +
-      `_This message will self-destruct in 5 seconds._`,
+      `_This message will self-destruct in ${KEY_MESSAGE_TTL_SECONDS} seconds._`,
       { parse_mode: "Markdown" }
     );
 
-    // Auto-delete after 5 seconds
-    setTimeout(async () => {
-      try {
-        await ctx.api.deleteMessage(chatId, sentMsg.message_id);
-      } catch (err) {
-        console.error(`[degen-hunter] Failed to auto-delete key message:`, err);
-      }
-    }, 5000);
+    // Persisted + retried delete (see scheduleSecureDelete)
+    scheduleSecureDelete(ctx.api, chatId, sentMsg.message_id, KEY_MESSAGE_TTL_SECONDS * 1000);
 
     return;
   } else {
@@ -2046,7 +2201,7 @@ async function handleExportKeyAction(ctx: any) {
   await ctx.editMessageText(
     `🔐 *Export Private Key*\n\n` +
     `Enter your PIN in the chat to decrypt and display your burner wallet private key.\n\n` +
-    `⚠️ The key will be shown for *5 seconds* then deleted automatically.`,
+    `⚠️ The key will be shown for *${KEY_MESSAGE_TTL_SECONDS} seconds* then deleted automatically.`,
     { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("◀️ Cancel", "menu_wallet") }
   );
 }
@@ -2089,7 +2244,7 @@ async function handlePositionsAction(ctx: any) {
     const amountSOL = Number(pos.amountSOL);
     text += `*${pos.tokenSymbol}*\n`;
     text += `   SOL In: ${amountSOL.toFixed(4)} SOL\n`;
-    text += `   Entry: $${entryPrice.toFixed(6)}\n\n`;
+    text += `   Entry: ${formatPrice(entryPrice)}\n\n`;
     totalInvestedSOL += amountSOL;
   }
 
@@ -2267,6 +2422,7 @@ async function handleDetailsButton(ctx: any, tokenId: string) {
   }
 
   const ageMinutes = Math.floor((Date.now() - new Date(token.discoveredAt).getTime()) / 60000);
+  const detailRisk = riskSummary(token); // re-derived, so tokens stored before this fix show a consistent level too
 
   await ctx.editMessageText(
     `*📋 Token Details*\n\n` +
@@ -2275,7 +2431,7 @@ async function handleDetailsButton(ctx: any, tokenId: string) {
     `Contract: \`${token.contractAddress}\`\n` +
     `Age: ${ageMinutes >= 0 ? ageMinutes + " minutes" : "Unknown"}\n\n` +
     `*💰 Market Data*\n` +
-    `Price: ${token.priceUsd ? "$" + token.priceUsd.toFixed(6) : "Unknown"}\n` +
+    `Price: ${formatPrice(token.priceUsd)}\n` +
     `Market Cap: ${token.marketCapUsd ? "$" + token.marketCapUsd.toLocaleString() : "Unknown"}\n` +
     `FDV: ${token.fdvUsd ? "$" + token.fdvUsd.toLocaleString() : "Unknown"}\n` +
     `Liquidity: ${token.liquidityUsd ? "$" + token.liquidityUsd.toLocaleString() : "Unknown"}\n` +
@@ -2285,14 +2441,14 @@ async function handleDetailsButton(ctx: any, tokenId: string) {
     `Sells 24h: ${token.sells24h?.toLocaleString() ?? "Unknown"}\n` +
     `Buy/Sell Ratio: ${token.buys24h && token.sells24h ? (token.buys24h / token.sells24h).toFixed(2) : "Unknown"}\n\n` +
     `*🛡️ Risk Analysis*\n` +
-    `Risk Score: ${token.riskScore ?? "Unknown"}/100\n` +
     `Opportunity Score: ${token.totalScore ?? "Unknown"}/100\n` +
-    `Risk Level: ${token.totalScore !== undefined ? getRiskLevelFromScore(token.totalScore) : "Unknown"}\n` +
-    `Risk Flags: ${token.riskFlags?.length ? token.riskFlags.join(", ") : "None"}\n\n` +
+    `Risk Level: ${detailRisk.level}\n` +
+    `Risk Flags: ${detailRisk.flags}\n\n` +
     `*⚠️ Warnings*\n` +
-    `${token.warnings?.length ? token.warnings.map(w => `• ${w}`).join("\n") : "None"}\n\n` +
+    `${detailRisk.warnings.length ? detailRisk.warnings.map(w => `• ${w}`).join("\n") : "None"}\n\n` +
     `*🔍 Evidence*\n` +
-    `${token.evidence?.length ? token.evidence.map(e => `• ${e}`).join("\n") : "None"}`,
+    `${detailRisk.evidence.length ? detailRisk.evidence.map(e => `• ${e}`).join("\n") : "None"}\n` +
+    (detailRisk.unverified ? `\n*ℹ️ Not verified:* ${detailRisk.unverified}` : ""),
     { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("◀️ Back to Token", buildCallbackData("chart", tokenId)) }
   );
 }
@@ -2343,6 +2499,7 @@ async function handleWatchButton(ctx: any, tokenId: string, chatId: string) {
       addedAt: new Date(),
     },
   });
+  await setWatchBaseline(chatId, token.contractAddress, token.priceUsd);
 
   await ctx.editMessageText(
     `*👁️ Token Added to Watchlist*\n\n` +
@@ -2461,7 +2618,7 @@ async function handleBuyButton(ctx: any, tokenId: string, chatId: string) {
 
   const text = `💰 *Buy ${token.symbol}*\n\n` +
     `*Available Balance:* ${balance.toFixed(4)} SOL\n` +
-    `*Current Price:* $${(token.priceUsd || 0).toFixed(6)}\n\n` +
+    `*Current Price:* ${formatPrice(token.priceUsd ?? 0)}\n\n` +
     `Select amount to buy:`;
 
   const keyboard = new InlineKeyboard()
@@ -2517,14 +2674,29 @@ async function handleBuyAmount(ctx: any, tokenId: string, chatId: string, amount
     return;
   }
 
+  // Find out now — before a PIN is asked for — whether Jupiter can route this at all.
+  const route = await checkTradable(token.contractAddress, Math.floor(amount * 1e9));
+  if (!route.tradable) {
+    await ctx.editMessageText(
+      `🚫 *Can't buy ${token.symbol} right now*\n\n${route.reason}`,
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("◀️ Back", buildCallbackData("chart", tokenId)) }
+    );
+    return;
+  }
+  const impactNote =
+    route.priceImpactPct != null && route.priceImpactPct >= 5
+      ? `⚠️ *High price impact: ${route.priceImpactPct.toFixed(1)}%*. This amount will move the price against you.\n\n`
+      : "";
+
   const usdValue = amount * await getSolPriceUsd();
-  
+
   const text = `💰 *Review Trade*\n\n` +
     `*Action:* BUY\n` +
     `*Token:* ${token.symbol}\n` +
-    `*Entry Price:* $${(token.priceUsd || 0).toFixed(6)}\n` +
+    `*Entry Price:* ${formatPrice(token.priceUsd ?? 0)}\n` +
     `*Amount:* ${amount} SOL (~$${usdValue.toFixed(2)})\n` +
     `*Slippage:* 0.5%\n\n` +
+    impactNote +
     `*Balance After Trade:* ${(balance - amount).toFixed(4)} SOL\n\n` +
     `🔐 *Enter your PIN in the chat below to execute this trade.*`;
 
@@ -2589,21 +2761,28 @@ async function handleBuyConfirm(ctx: any, tokenId: string, chatId: string, amoun
   try {
     // Convert SOL to lamports (1 SOL = 1e9 lamports)
     const lamports = Math.floor(amount * 1e9);
-    const { txid } = await executeJupiterSwap(chatIdStr, SOL_MINT, token.contractAddress, lamports);
+    const { txid, quoteResponse } = await executeJupiterSwap(chatIdStr, SOL_MINT, token.contractAddress, lamports);
 
-    // Record position
-    const estimatedTokens = token.priceUsd && token.priceUsd > 0
-      ? (amount * (await getSolPriceUsd())) / token.priceUsd
-      : 0;
+    // Record the position from the actual fill: tokens received (the quote's
+    // output, in the token's real decimals) and what that cost in USD. That's the
+    // true entry price, slippage included. Falls back to the scanner's price only
+    // if the quote has no output amount.
+    const solUsd = await getSolPriceUsd();
+    const decimals = await getTokenDecimals(token.contractAddress);
+    const filledTokens = quoteResponse?.outAmount ? Number(quoteResponse.outAmount) / Math.pow(10, decimals) : 0;
+    const estimatedTokens = filledTokens > 0
+      ? filledTokens
+      : token.priceUsd && token.priceUsd > 0 ? (amount * solUsd) / token.priceUsd : 0;
+    const entryPriceUsd = filledTokens > 0 ? (amount * solUsd) / filledTokens : token.priceUsd || 0;
 
-    await safePrisma.degenHunterPosition.create?.({ 
+    await safePrisma.degenHunterPosition.create?.({
       data: {
         chatId: chatIdStr,
         tokenAddress: token.contractAddress,
         tokenSymbol: token.symbol,
         tokenAmount: estimatedTokens,
         amountSOL: amount,
-        entryPriceUsd: token.priceUsd || 0,
+        entryPriceUsd,
         status: "OPEN",
       }
     });
@@ -2612,20 +2791,22 @@ async function handleBuyConfirm(ctx: any, tokenId: string, chatId: string, amoun
       chatIdStr, ctx.callbackQuery?.message?.message_id,
       `*✅ Buy Executed!*\n\n` +
       `Bought: ${amount.toFixed(4)} SOL of ${token.symbol}\n` +
-      `Price: $${(token.priceUsd || 0).toFixed(6)}\n\n` +
+      `Price: ${formatPrice(token.priceUsd ?? 0)}\n\n` +
       `*TX:* \`${txid}\`\n` +
       `https://solscan.io/tx/${txid}`,
       { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("◀️ Back to Token", buildCallbackData("chart", tokenId)) }
     );
   } catch (err: any) {
     const msg = err?.message || String(err);
-    const isInsufficient = msg.includes("insufficient") || msg.includes("0x1");
+    const failure = classifyTradeError(msg); // names what failed; the old 0x1 text match blamed SOL for slippage and token-balance errors
     await ctx.api.editMessageText(
       chatIdStr, ctx.callbackQuery?.message?.message_id,
       `❌ *Transaction Failed*\n\n` +
-      (isInsufficient
-        ? `Insufficient SOL for this trade and transaction fees.\nDeposit more SOL to \`${walletRecord.publicKey}\`.`
-        : `Error: ${msg.substring(0, 200)}`),
+      (failure.kind === "sol-for-fees"
+        ? `${failure.message}\nDeposit SOL to \`${walletRecord.publicKey}\`.`
+        : failure.kind === "other"
+          ? `Error: ${msg.substring(0, 200)}`
+          : failure.message),
       { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("◀️ Back to Token", buildCallbackData("chart", tokenId)) }
     );
   }
@@ -2670,7 +2851,7 @@ async function handleSellButton(ctx: any, tokenId: string, chatId: string) {
 
   const text = `📉 *Sell ${token.symbol}*\n\n` +
     `*Your Position:* ${positionSol.toFixed(4)} SOL (~$${usdValue.toFixed(2)})\n` +
-    `*Current Price:* $${(token.priceUsd || 0).toFixed(6)}\n\n` +
+    `*Current Price:* ${formatPrice(token.priceUsd ?? 0)}\n\n` +
     `Select amount to sell:`;
 
   const keyboard = new InlineKeyboard()
@@ -2721,7 +2902,7 @@ async function handleSellAmount(ctx: any, tokenId: string, chatId: string, perce
   const text = `📉 *Review Trade*\n\n` +
     `*Action:* SELL ${percent}%\n` +
     `*Token:* ${token.symbol}\n` +
-    `*Exit Price:* $${(token.priceUsd || 0).toFixed(6)}\n` +
+    `*Exit Price:* ${formatPrice(token.priceUsd ?? 0)}\n` +
     `*Amount:* ${amountToSell.toFixed(4)} SOL tokens sold\n` +
     `*Est. Value Received:* ${solValueReceived.toFixed(4)} SOL (~$${usdValue.toFixed(2)})\n` +
     `*Slippage:* 0.5%\n\n` +
@@ -2763,11 +2944,33 @@ async function handleSellConfirm(ctx: any, tokenId: string, chatId: string, perc
     return;
   }
 
-  const tokenAmountToSell = Number(openPosition.tokenAmount) * (percent / 100);
-  // Jupiter requires the token amount in smallest units
-  // For most SPL tokens, we need to get the decimals, but for simplicity we use 1e6 (6 decimals) as default
-  const TOKEN_DECIMALS = 6;
-  const tokenAmountSmallest = Math.floor(tokenAmountToSell * Math.pow(10, TOKEN_DECIMALS));
+  // The wallet is the source of truth, not the recorded amount (the buy quote's estimate, which can exceed what was
+  // delivered: selling "100%" of it asked for tokens that don't exist and failed with SPL error 0x1).
+  const holding = await getTokenHolding(rpcEndpoint(), walletRecord.publicKey, token.contractAddress);
+  if (!holding.ok) {
+    await ctx.editMessageText("❌ Couldn't read the wallet's balance from the chain right now. Nothing was sent. Try again in a moment.");
+    return;
+  }
+  if (holding.raw === 0n) {
+    // Sold or moved outside the app: the position is already closed in reality. Fix the record; send nothing.
+    await safePrisma.degenHunterPosition.update?.({ where: { id: openPosition.id }, data: { status: "CLOSED", tokenAmount: 0 } });
+    await prisma.$executeRawUnsafe(`UPDATE "DegenHunterPosition" SET closedAt = CURRENT_TIMESTAMP WHERE id = ? AND closedAt IS NULL`, openPosition.id).catch(() => {});
+    await ctx.editMessageText(`ℹ️ Your wallet no longer holds ${token.symbol}: it was already sold or moved outside the app. I've marked the position closed. Nothing was sent.`);
+    return;
+  }
+  // A failed lookup is "unknown" (null), never 0 — getSolBalance() returns 0 on an RPC error, which would block a sell with a false "no SOL".
+  const solBal = await getConnection().getBalance(new PublicKey(walletRecord.publicKey)).then((l) => l / 1e9).catch(() => null);
+  if (typeof solBal === "number" && solBal < MIN_SOL_FOR_FEES) {
+    await ctx.editMessageText(
+      `❌ Not enough SOL for fees: the wallet has ${solBal.toFixed(5)} SOL and a swap needs about ${MIN_SOL_FOR_FEES} SOL on top of the trade.\nDeposit SOL to \`${walletRecord.publicKey}\`.`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+  const rawToSell = sellAmountRaw(holding.raw, percent);
+  const tokenAmountSmallest = Number(rawToSell);
+  const tokenAmountToSell = Number(rawToSell) / Math.pow(10, holding.decimals);
+  const heldUi = holding.ui;
 
   if (tokenAmountSmallest <= 0) {
     await ctx.editMessageText("❌ Position amount too small to sell.");
@@ -2777,25 +2980,67 @@ async function handleSellConfirm(ctx: any, tokenId: string, chatId: string, perc
   await ctx.editMessageText(`⏳ *Executing Sell...*\n\nSelling ${percent}% of ${token.symbol} position`, { parse_mode: "Markdown" });
 
   try {
-    const { txid } = await executeJupiterSwap(chatIdStr, token.contractAddress, SOL_MINT, tokenAmountSmallest);
+    const { txid, quoteResponse } = await executeJupiterSwap(chatIdStr, token.contractAddress, SOL_MINT, tokenAmountSmallest);
 
     // Update position: if 100%, mark CLOSED; otherwise reduce amount
     if (percent >= 100) {
       await safePrisma.degenHunterPosition.update?.({ where: { id: openPosition.id }, data: { status: "CLOSED", tokenAmount: 0 } });
     } else {
-      const newTokenAmount = Number(openPosition.tokenAmount) - tokenAmountToSell;
+      const newTokenAmount = Math.max(0, heldUi - tokenAmountToSell);
       await safePrisma.degenHunterPosition.update?.({ where: { id: openPosition.id }, data: { tokenAmount: newTokenAmount } });
+    }
+
+    // Realized PnL: record what this sell returned, and on a full close build the
+    // trade card. Kept in its own try so a bookkeeping/card problem can never
+    // turn a sell that already went through into a "Sell Failed" message.
+    let tradeCard: { png: Buffer; transparentPng: Buffer; caption: string } | null = null;
+    try {
+      await recordSell({
+        positionId: openPosition.id,
+        solReceived: Number(quoteResponse?.outAmount) / 1e9,
+        tokensSold: tokenAmountToSell,
+        solUsd: await getSolPriceUsd(),
+        closed: percent >= 100,
+      });
+      if (percent >= 100) {
+        const stats = await getClosedTradeStats(openPosition.id);
+        if (stats) {
+          tradeCard = {
+            // The inline photo gets a dark canvas: Telegram flattens photo transparency onto a colour of its own.
+            png: await buildTradeCardPng(stats, "dark"),
+            // The same card with nothing around it, sent as a file (files keep real transparency) for sharing.
+            transparentPng: await buildTradeCardPng(stats, "transparent"),
+            caption: tradeCaption(stats),
+          };
+        }
+      }
+    } catch (pnlErr) {
+      log("degen-hunter-telegram", "warn", `PnL record/card failed for ${token.symbol}: ${(pnlErr as Error).message}`);
     }
 
     await ctx.api.editMessageText(
       chatIdStr, ctx.callbackQuery?.message?.message_id,
       `*✅ Sell Executed!*\n\n` +
       `Sold: ${percent}% of ${token.symbol} position\n` +
-      `Price: $${(token.priceUsd || 0).toFixed(6)}\n\n` +
+      `Price: ${formatPrice(token.priceUsd ?? 0)}\n\n` +
       `*TX:* \`${txid}\`\n` +
       `https://solscan.io/tx/${txid}`,
       { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("◀️ Back to Token", buildCallbackData("chart", tokenId)) }
     );
+
+    // The closed-trade card: X, %, entry → exit, SOL in/out.
+    if (tradeCard) {
+      await ctx.api
+        .sendPhoto(chatIdStr, new InputFile(tradeCard.png, `${token.symbol}-trade.png`), { caption: tradeCard.caption })
+        .catch((e: Error) => log("degen-hunter-telegram", "warn", `Could not send trade card: ${e.message}`));
+      // The transparent version, as a file so Telegram keeps its alpha channel (silent: it's the same trade, just for sharing).
+      await ctx.api
+        .sendDocument(chatIdStr, new InputFile(tradeCard.transparentPng, `${token.symbol}-trade-transparent.png`), {
+          caption: "Same card, no background (transparent PNG) — for sharing.",
+          disable_notification: true,
+        })
+        .catch((e: Error) => log("degen-hunter-telegram", "warn", `Could not send transparent trade card: ${e.message}`));
+    }
   } catch (err: any) {
     const msg = err?.message || String(err);
     await ctx.api.editMessageText(
@@ -2879,10 +3124,75 @@ async function getTokenById(tokenId: string): Promise<DegenToken | null> {
   return null;
 }
 
-function getRiskLevelFromScore(score: number): string {
-  if (score >= 80) return "🔴 High";
-  if (score >= 50) return "🟡 Medium";
-  return "🟢 Low";
+/**
+ * Risk, as shown in alerts: one assessment (assessRisk, @max/shared) gives the
+ * level AND the reasons, so they always agree. This replaces a mapping from the
+ * *opportunity* score, which labelled a high-opportunity token "🔴 High" risk
+ * with no flags to back it up.
+ */
+const RISK_LABEL = { low: "🟢 Low", medium: "🟡 Medium", high: "🔴 High", critical: "⛔ Critical" } as const;
+
+function riskSummary(token: DegenToken) {
+  const a = assessRisk(token);
+  const level = `${RISK_LABEL[a.level]}${a.level === "low" && a.limitedChecks ? " (limited checks)" : ""}`;
+  return {
+    level,
+    flags: a.riskFlags.length ? a.riskFlags.join(", ") : "None found",
+    warnings: a.warnings,
+    evidence: a.evidence,
+    // What couldn't be checked: "no flag" on these means unknown, not fine.
+    unverified: a.unverified.length ? a.unverified.join(", ") : "",
+  };
+}
+
+/** The action buttons on a token card. Shared by private-chat alerts and the /start d_<id> deep link, so both look and behave the same. */
+function alertKeyboard(token: DegenToken) {
+  return InlineKeyboard.from([
+    [
+      { text: "📊 Chart", callback_data: buildCallbackData("chart", token.id) },
+      { text: "📋 Details", callback_data: buildCallbackData("details", token.id) },
+    ],
+    [
+      { text: "👁️ Watch", callback_data: buildCallbackData("watch", token.id) },
+      { text: "🚫 Ignore", callback_data: buildCallbackData("ignore", token.id) },
+    ],
+    [
+      { text: "💰 Buy", callback_data: buildCallbackData("buy", token.id) },
+      { text: "🔇 Mute", callback_data: buildCallbackData("mute", token.id) },
+    ]
+  ]);
+}
+
+/**
+ * Sends a watchlist performance alert (an X milestone, a drop, or a rug).
+ * Goes to the alerts channel when DEGEN_ALERTS_CHAT_ID is set, otherwise the
+ * owner's private chat. Link button only, for the same reason as token
+ * alerts: callback buttons in a channel can't tell whose wallet is acting.
+ */
+export async function sendWatchlistAlert(ownerChatId: string, text: string, chartUrl?: string): Promise<void> {
+  if (!bot) startBot();
+  if (!bot) throw new Error("Degen Hunter bot is not available");
+  const target = process.env.DEGEN_ALERTS_CHAT_ID?.trim() || ownerChatId;
+  await bot.api.sendMessage(target, text, {
+    reply_markup: chartUrl ? new InlineKeyboard().url("📊 Chart", chartUrl) : undefined,
+    link_preview_options: { is_disabled: true },
+  });
+}
+
+/**
+ * Records the price a token had when it went on the watchlist — the "1×" that
+ * later multiples are measured against. Only fills a missing baseline, so
+ * re-watching never resets an existing one. Raw SQL: the column was added
+ * after the Prisma client was generated (see lib/watchlistMonitor.ts).
+ */
+async function setWatchBaseline(chatId: string, tokenAddress: string, priceUsd?: number) {
+  if (!(typeof priceUsd === "number" && priceUsd > 0)) return;
+  await prisma
+    .$executeRawUnsafe(
+      `UPDATE "DegenHunterWatchlist" SET baselinePriceUsd = ? WHERE chatId = ? AND tokenAddress = ? AND baselinePriceUsd IS NULL`,
+      priceUsd, chatId, tokenAddress
+    )
+    .catch(() => {});
 }
 
 // Function to send token alerts (to be called from the agent)
@@ -2909,23 +3219,16 @@ export async function sendTokenAlert(token: DegenToken): Promise<void> {
   // In a full implementation, we'd check per-user mute lists
 
   // Generate alert message (reuse existing function but enhance for Telegram)
-  const alertMessage = generateEnhancedTokenAlert(token);
+  // Can Jupiter route a buy right now? Brand-new tokens often can't yet, and the
+  // owner would otherwise only find out after going through the buy flow.
+  const route = await checkTradable(token.contractAddress, 10_000_000); // probe with 0.01 SOL
+  const tradableLine = route.tradable
+    ? "✅ Tradable on Jupiter"
+    : "⏳ Not tradable on Jupiter yet — a buy will fail until it's indexed (usually a few minutes)";
+  const alertMessage = `${generateEnhancedTokenAlert(token)}\n\n${tradableLine}`;
 
   // Create inline keyboard
-  const keyboard = InlineKeyboard.from([
-    [
-      { text: "📊 Chart", callback_data: buildCallbackData("chart", token.id) },
-      { text: "📋 Details", callback_data: buildCallbackData("details", token.id) },
-    ],
-    [
-      { text: "👁️ Watch", callback_data: buildCallbackData("watch", token.id) },
-      { text: "🚫 Ignore", callback_data: buildCallbackData("ignore", token.id) },
-    ],
-    [
-      { text: "💰 Buy", callback_data: buildCallbackData("buy", token.id) },
-      { text: "🔇 Mute", callback_data: buildCallbackData("mute", token.id) },
-    ]
-  ]);
+  const keyboard = alertKeyboard(token);
 
   // Fetch all users who have alerts enabled
   const users = await safePrisma.degenHunterUser.findMany({
@@ -2934,6 +3237,42 @@ export async function sendTokenAlert(token: DegenToken): Promise<void> {
 
   if (!users || users.length === 0) {
     return;
+  }
+
+  // Separate alerts channel/group: when DEGEN_ALERTS_CHAT_ID is set, token
+  // alerts go there once and the private chat stays reserved for the wallet
+  // (balance, PIN, buy/sell, withdraw). Only URL buttons are attached — every
+  // wallet/trade callback handler resolves *whose wallet* from ctx.chat.id,
+  // which in a channel/group would be the channel's id, not the owner's, so
+  // callback buttons (Buy/Watch/Ignore/Mute) must not be posted there.
+  const alertsChatId = process.env.DEGEN_ALERTS_CHAT_ID?.trim();
+  if (alertsChatId) {
+    const anyoneWants = users.some((u) => !mutedTokens.has(`${u.chatId}:${token.contractAddress}`));
+    if (anyoneWants) {
+      const botUsername = process.env.DEGEN_BOT_USERNAME?.replace(/^@/, "");
+      const urlRow: { text: string; url: string }[] = [
+        { text: "📊 Chart", url: token.dexUrl || `https://dexscreener.com/solana/${token.contractAddress}` },
+      ];
+      // Deep link: opens the bot on *this token's* card, not just the bot's chat.
+      if (botUsername) urlRow.push({ text: "💰 Open in bot", url: `https://t.me/${botUsername}?start=d_${getShortId(token.id)}` });
+      try {
+        await bot.api.sendMessage(alertsChatId, alertMessage, {
+          reply_markup: InlineKeyboard.from([urlRow]),
+          parse_mode: "Markdown",
+          link_preview_options: { is_disabled: true },
+        });
+        alertCooldowns.set(chatIdStr, now);
+        // Success used to be silent, so "Sent N alerts" in the activity feed
+        // couldn't be told apart from a send that quietly didn't happen.
+        log("degen-hunter-telegram", "info", `Posted alert to alerts channel: ${token.symbol}`);
+        return;
+      } catch (err) {
+        // Don't fall through to DMs: that would silently re-create the stacked
+        // chat this setting exists to avoid. Surface it and keep the cooldown unset so the next scan retries.
+        log("degen-hunter-telegram", "error", `Failed to send alert to DEGEN_ALERTS_CHAT_ID (is the bot an admin of that channel/group?): ${(err as Error).message}`);
+        return;
+      }
+    }
   }
 
   // Broadcast to all active users
@@ -2960,6 +3299,7 @@ export async function sendTokenAlert(token: DegenToken): Promise<void> {
 }
 
 function generateEnhancedTokenAlert(token: DegenToken): string {
+  const risk = riskSummary(token);
   const ageMinutes = token.tokenAgeMinutes ?? 0;
   const ageDisplay = ageMinutes < 60
     ? `${ageMinutes} min`
@@ -2969,7 +3309,7 @@ function generateEnhancedTokenAlert(token: DegenToken): string {
     `🔥 *DEGEN HUNTER ALERT* 🔥\n`,
     `*${token.name}* ($${token.symbol})\n`,
     `🔗 Solana | ${ageDisplay}\n`,
-    `💰 Price: $${token.priceUsd?.toFixed(6) || "?"}\n`,
+    `💰 Price: ${formatPrice(token.priceUsd)}\n`,
     `📊 Market Cap: $${token.marketCapUsd?.toLocaleString() || "?"}\n`,
     `📈 FDV: $${token.fdvUsd?.toLocaleString() || "?"}\n`,
     `💧 Liquidity: $${token.liquidityUsd?.toLocaleString() || "?"}\n`,
@@ -2977,9 +3317,11 @@ function generateEnhancedTokenAlert(token: DegenToken): string {
     `📈 Buys 24h: ${token.buys24h?.toLocaleString() || "?"}\n`,
     `📉 Sells 24h: ${token.sells24h?.toLocaleString() || "?"}\n`,
     `🎯 Opportunity Score: ${token.totalScore || "?"}/100\n`,
-    `⚠️ Risk Level: ${getRiskLevelFromScore(token.totalScore || 0)}\n`,
-    `🏷️ Risk Flags: ${token.riskFlags?.length ? token.riskFlags.join(", ") : "None"}\n`,
-    `⚠️ Warnings: ${token.warnings?.length ? token.warnings.slice(0, 3).join(" | ") : "None"}\n`,
+    `⚠️ Risk Level: ${risk.level}\n`,
+    `🏷️ Risk Flags: ${risk.flags}\n`,
+    // Every elevated level has at least one warning here (the level is derived from the flags).
+    risk.warnings.length ? `⚠️ Why: ${risk.warnings.slice(0, 4).map((w) => `• ${w}`).join("\n")}\n` : "",
+    risk.unverified ? `ℹ️ Not verified: ${risk.unverified}\n` : "",
     `🔗 [View on DexScreener](${token.dexUrl || `https://dexscreener.com/solana/${token.contractAddress}`})\n`,
     `_Contract: \`${token.contractAddress}\`_`,
   ].filter(Boolean).join("\n");

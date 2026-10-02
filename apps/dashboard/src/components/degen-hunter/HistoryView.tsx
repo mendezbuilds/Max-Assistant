@@ -66,12 +66,15 @@ export function HistoryView({ onOpenDetails }: { onOpenDetails: (token: Dashboar
       } else if (walletRes.ok) {
         const walletData = await walletRes.json();
         for (const act of walletData.recentActivity ?? []) {
+          // recentActivity rows are positions: { amountSOL, entryPriceUsd, status: OPEN | CLOSED }.
+          // (This used to read amountSol / price / action, which don't exist, and threw on the first trade.)
+          const closed = act.status === "CLOSED";
           result.push({
             id: `trade_${act.id}`,
             category: "trades",
-            icon: act.action === "BUY" ? "💰" : "💸",
-            title: `${act.action === "BUY" ? "Bought" : "Sold"} $${act.tokenSymbol}`,
-            detail: `${act.amountSol.toFixed(4)} SOL · @$${act.price.toExponential(2)}${act.isPaperTrade ? " (paper)" : ""}`,
+            icon: closed ? "💸" : "💰",
+            title: `${closed ? "Closed" : "Bought"} $${act.tokenSymbol}`,
+            detail: `${Number(act.amountSOL).toFixed(4)} SOL · entry @$${Number(act.entryPriceUsd).toExponential(2)}`,
             timestamp: act.timestamp,
           });
         }
@@ -105,7 +108,12 @@ export function HistoryView({ onOpenDetails }: { onOpenDetails: (token: Dashboar
     setLoading(false);
   }, []);
 
-  useEffect(() => { fetchHistory(); }, [fetchHistory]);
+  // Load once, then keep itself current (skipped while the tab is hidden).
+  useEffect(() => {
+    fetchHistory();
+    const t = setInterval(() => { if (document.visibilityState === "visible") fetchHistory(); }, 30_000);
+    return () => clearInterval(t);
+  }, [fetchHistory]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();

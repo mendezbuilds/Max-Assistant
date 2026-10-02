@@ -1,5 +1,6 @@
 "use client";
 
+import { glowColor } from "@/lib/hq-config";
 import type { AgentVisual } from "@/lib/hq-config";
 import type { AgentData } from "./types";
 
@@ -84,7 +85,7 @@ export function AgentNode({ agent, visual, pathD, durationSec, delaySec, active,
         ref={registerRef}
         onClick={onClick}
         className="group pointer-events-auto absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full focus:outline-none"
-        style={{ width: size, height: size, ["--node-glow" as string]: `${visual.color}66` }}
+        style={{ width: size, height: size, ["--node-glow" as string]: glowColor(visual.color) }}
         aria-label={`Open ${agent.name}`}
       >
         {visual.hasSaturnRing && (
@@ -103,8 +104,10 @@ export function AgentNode({ agent, visual, pathD, durationSec, delaySec, active,
           />
         )}
         <div
+          // Active (enabled): glows in its own color. Inactive: same node,
+          // dimmed, and no glow at all.
           className={`relative flex h-full w-full items-center justify-center rounded-full transition-all ${
-            active ? "node-active border-2" : "border"
+            active ? "node-active border-2" : "border opacity-45 saturate-50"
           }`}
           style={{
             // A fully opaque base fill (the last, plain-color layer) with

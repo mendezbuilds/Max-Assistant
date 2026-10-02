@@ -1,10 +1,10 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { 
-  IconWallet, IconRefresh, IconAlertTriangle, IconArrowUpRight, 
-  IconArrowDownLeft, IconLock, IconShield, IconSend, IconQrcode, 
-  IconSettings, IconTrash, IconKey
+import {
+  IconWallet, IconRefresh, IconAlertTriangle, IconArrowUpRight,
+  IconArrowDownLeft, IconLock, IconShield, IconSend, IconQrcode,
+  IconTrash, IconKey, IconClock, IconX
 } from "@tabler/icons-react";
 
 interface Position {
@@ -16,6 +16,48 @@ interface Position {
   entryPriceUsd: number;
   status: "OPEN" | "CLOSED";
   createdAt: string;
+  updatedAt?: string;
+}
+
+interface WalletEvent {
+  id: number;
+  kind: "withdraw" | "withdraw_failed" | "trade_failed" | string;
+  label: string;
+  detail: string | null;
+  amountSOL: number | null;
+  timestamp: string;
+}
+
+interface Mark {
+  tokenAddress: string;
+  status: string;
+  multiple: number | null;
+}
+
+type ActivityType = "buy" | "sell" | "withdraw" | "failed";
+interface ActivityRow {
+  key: string;
+  type: ActivityType;
+  title: string;
+  detail: string;
+  at: number;
+}
+
+// Badge colors by transaction type: green ↙ buy, amber ↗ sell, blue send, red ✕ failed.
+const ACTIVITY_STYLE: Record<ActivityType, { badge: string; icon: typeof IconSend }> = {
+  buy: { badge: "bg-emerald-950/70 text-emerald-400", icon: IconArrowDownLeft },
+  sell: { badge: "bg-amber-950/70 text-amber-400", icon: IconArrowUpRight },
+  withdraw: { badge: "bg-sky-950/70 text-sky-400", icon: IconSend },
+  failed: { badge: "bg-rose-950/70 text-rose-400", icon: IconX },
+};
+
+function timeAgo(ms: number): string {
+  if (!Number.isFinite(ms)) return "";
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
 interface Activity {
@@ -36,17 +78,42 @@ interface WalletData {
   recentActivity: Activity[];
   balanceSource?: string;
   message?: string;
+  solUsd?: number | null;
+  solChange24h?: number | null;
+  transactions?: WalletEvent[];
+  /** Token balances the wallet actually holds on-chain, priced live. */
+  tokens?: HeldToken[];
+}
+
+interface HeldToken {
+  mint: string;
+  symbol: string;
+  name: string | null;
+  amount: number;
+  priceUsd: number | null;
+  valueUsd: number | null;
+}
+
+function fmtTokenAmount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
+  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function fmtUsdValue(n: number): string {
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
 }
 
 type TabType = "overview" | "send" | "receive" | "settings";
 
-export function WalletView() {
+export function WalletView({ initialTab = "overview" }: { initialTab?: TabType } = {}) {
   const [wallet, setWallet] = useState<WalletData | null>(null);
+  const [marks, setMarks] = useState<Mark[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notMapped, setNotMapped] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabType>("overview");
+  const [activeTab, setActiveTab] = useState<TabType>(initialTab);
 
   // Send State
   const [sendDest, setSendDest] = useState("");
@@ -82,6 +149,11 @@ export function WalletView() {
       setWallet(data);
       setNotMapped(false);
       setError(null);
+      // Current multiples for the position bars; best-effort, bars just stay empty without them.
+      fetch("/api/agents/degen-hunter/position-marks")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => d && setMarks(d.marks ?? []))
+        .catch(() => {});
     } catch (e: any) {
       setError(e?.message ?? "Unknown error");
     } finally {
@@ -232,27 +304,43 @@ export function WalletView() {
   }
 
   const openPositions = wallet?.positions?.filter((p) => p.status === "OPEN") ?? [];
+  const markFor = (addr: string) => marks.find((m) => m.tokenAddress === addr && m.status === "OPEN");
+
+  // Recent activity: buys (every position row), sells (closed rows), plus withdrawals and failures recorded by the send/trade routes.
+  const activity: ActivityRow[] = [];
+  for (const p of wallet?.positions ?? []) {
+    activity.push({ key: `b${p.id}`, type: "buy", title: `Bought ${p.tokenSymbol}`, detail: `${Number(p.amountSOL).toFixed(4)} SOL`, at: Date.parse(p.createdAt) });
+    if (p.status === "CLOSED" && p.updatedAt) {
+      activity.push({ key: `s${p.id}`, type: "sell", title: `Sold ${p.tokenSymbol}`, detail: `${Number(p.amountSOL).toFixed(4)} SOL position`, at: Date.parse(p.updatedAt) });
+    }
+  }
+  for (const t of wallet?.transactions ?? []) {
+    const failed = t.kind !== "withdraw";
+    activity.push({
+      key: `t${t.id}`,
+      type: failed ? "failed" : "withdraw",
+      title: t.label,
+      detail: [t.amountSOL != null ? `${t.amountSOL} SOL` : null, t.detail].filter(Boolean).join(" · "),
+      at: Date.parse(t.timestamp),
+    });
+  }
+  activity.sort((a, b) => b.at - a.at);
+  const recent = activity.slice(0, 12);
+
+  const usd = wallet.solUsd != null ? wallet.balanceSol * wallet.solUsd : null;
 
   return (
-    <div className="flex flex-col gap-6 max-w-4xl">
+    <div className="flex max-w-4xl flex-col gap-5">
       {/* Header & Tabs */}
       <div>
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-900 border border-slate-800 text-slate-400">
-              <IconWallet size={20} />
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-slate-200">Burner Wallet</h2>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs text-slate-500">
-                  {wallet.address.slice(0, 8)}…{wallet.address.slice(-6)}
-                </span>
-                <span className="rounded bg-emerald-950 border border-emerald-900/40 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-emerald-500">
-                  Real Solana
-                </span>
-              </div>
-            </div>
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs text-slate-500">
+              {wallet.address.slice(0, 8)}…{wallet.address.slice(-6)}
+            </span>
+            <span className="rounded border border-emerald-900/40 bg-emerald-950 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-emerald-500">
+              Real Solana
+            </span>
           </div>
           <button
             onClick={handleRefresh}
@@ -265,89 +353,170 @@ export function WalletView() {
         </div>
 
         <div className="flex gap-2 border-b border-slate-800 pb-2">
-          <button onClick={() => setActiveTab("overview")} className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded transition-colors ${activeTab === 'overview' ? 'bg-slate-800 text-slate-200' : 'text-slate-500 hover:bg-slate-900'}`}>Overview</button>
-          <button onClick={() => setActiveTab("send")} className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded transition-colors ${activeTab === 'send' ? 'bg-slate-800 text-slate-200' : 'text-slate-500 hover:bg-slate-900'}`}>Send</button>
-          <button onClick={() => setActiveTab("receive")} className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded transition-colors ${activeTab === 'receive' ? 'bg-slate-800 text-slate-200' : 'text-slate-500 hover:bg-slate-900'}`}>Receive</button>
-          <button onClick={() => setActiveTab("settings")} className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded transition-colors ${activeTab === 'settings' ? 'bg-slate-800 text-slate-200' : 'text-slate-500 hover:bg-slate-900'}`}>Settings</button>
+          {(["overview", "send", "receive", "settings"] as TabType[]).map((t) => (
+            <button
+              key={t}
+              onClick={() => setActiveTab(t)}
+              className={`rounded px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-colors ${activeTab === t ? "bg-slate-800 text-slate-200" : "text-slate-500 hover:bg-slate-900"}`}
+            >
+              {t}
+            </button>
+          ))}
         </div>
       </div>
 
       {activeTab === "overview" && (
-        <div className="flex flex-col gap-6">
-          {/* Balance Card */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/30 overflow-hidden relative">
-            <div className="absolute top-4 right-4">
-              {wallet?.status === "unfunded" ? (
-                <span className="rounded-full bg-amber-950/50 border border-amber-900/40 px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-amber-500">Unfunded</span>
-              ) : (
-                <span className="rounded-full bg-emerald-950/50 border border-emerald-900/40 px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-emerald-500">Funded</span>
-              )}
+        <div className="flex flex-col gap-5">
+          {/* Hero balance card */}
+          <div
+            className="relative overflow-hidden rounded-[14px] border p-5"
+            style={{ background: "linear-gradient(135deg, #1a2420, #0f1614)", borderColor: "#2a3a30" }}
+          >
+            {/* soft decorative glow, top-right */}
+            <div
+              className="pointer-events-none absolute -right-10 -top-10 h-40 w-40 rounded-full"
+              style={{ background: "radial-gradient(circle, rgba(127,233,164,0.16) 0%, rgba(127,233,164,0) 70%)" }}
+            />
+            <p className="relative text-[11px] font-semibold uppercase tracking-[0.14em]" style={{ color: "#6b8a78" }}>
+              Total balance
+            </p>
+            <div className="relative mt-1.5 flex items-baseline gap-1.5">
+              <span className="font-mono text-[30px] font-bold leading-none text-slate-100">{wallet.balanceSol.toFixed(4)}</span>
+              <span className="text-base font-semibold" style={{ color: "#7fe9a4" }}>SOL</span>
             </div>
-            <div className="p-6">
-              <p className="font-mono text-xs font-bold uppercase tracking-widest text-slate-500">Real SOL Balance</p>
-              <div className="mt-2 flex items-end gap-2">
-                <span className="font-mono text-4xl font-bold text-slate-100">{wallet?.balanceSol.toFixed(4)}</span>
-                <span className="mb-1 font-mono text-lg text-slate-500">SOL</span>
-              </div>
+            {usd != null ? (
+              <p className="relative mt-1.5 font-mono text-sm" style={{ color: "#7fe9a4" }}>
+                ≈ ${usd.toFixed(2)}
+                {wallet.solChange24h != null && (
+                  <span className="ml-2 text-xs text-slate-500">
+                    SOL {wallet.solChange24h >= 0 ? "+" : ""}{wallet.solChange24h.toFixed(1)}% today
+                  </span>
+                )}
+              </p>
+            ) : (
+              <p className="relative mt-1.5 text-xs text-slate-600">USD price unavailable</p>
+            )}
+
+            <div className="relative mt-4 flex flex-wrap gap-2">
+              <button
+                onClick={() => setActiveTab("send")}
+                className="flex items-center gap-1.5 rounded-full border px-4 py-2 text-xs font-semibold transition hover:brightness-125"
+                style={{ background: "#1d2c24", borderColor: "#2f4a3a", color: "#7fe9a4" }}
+              >
+                <IconArrowUpRight size={15} /> Send
+              </button>
+              <button
+                onClick={() => setActiveTab("receive")}
+                className="flex items-center gap-1.5 rounded-full border border-slate-700/70 bg-slate-900/50 px-4 py-2 text-xs font-medium text-slate-300 transition hover:bg-slate-800"
+              >
+                <IconQrcode size={15} /> Receive
+              </button>
+              <button
+                onClick={() => document.getElementById("wallet-activity")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                className="flex items-center gap-1.5 rounded-full border border-slate-700/70 bg-slate-900/50 px-4 py-2 text-xs font-medium text-slate-300 transition hover:bg-slate-800"
+              >
+                <IconClock size={15} /> History
+              </button>
             </div>
           </div>
 
-          {/* Open Positions */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/20 p-4">
-            <h3 className="mb-4 font-mono text-xs font-bold uppercase tracking-widest text-slate-400">Open Positions ({openPositions.length})</h3>
-            {openPositions.length === 0 ? (
-              <div className="py-8 text-center">
-                <p className="text-sm text-slate-600">No open positions.</p>
-                <p className="mt-1 text-xs text-slate-700">Use the Buy button in Telegram to open a trade.</p>
+          {/* Tokens held — read from the chain, priced live */}
+          <div>
+            <div className="mb-2 flex items-baseline justify-between">
+              <h3 className="font-mono text-[10px] font-bold uppercase tracking-widest text-slate-500">Tokens · {wallet.tokens?.length ?? 0}</h3>
+              {(wallet.tokens?.length ?? 0) > 0 && (
+                <span className="font-mono text-xs text-[#7fe9a4]">
+                  ≈ {fmtUsdValue((wallet.tokens ?? []).reduce((sum, t) => sum + (t.valueUsd ?? 0), 0))}
+                </span>
+              )}
+            </div>
+            {(wallet.tokens?.length ?? 0) === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-800 py-5 text-center">
+                <p className="text-sm text-slate-600">No tokens in this wallet.</p>
+                <p className="mt-1 text-xs text-slate-700">Tokens you buy show up here with their live value.</p>
               </div>
             ) : (
-              <div className="flex flex-col gap-2">
-                {openPositions.map((pos) => (
-                  <div key={pos.id} className="flex items-center justify-between rounded-lg border border-slate-800/60 bg-slate-900/40 p-3">
-                    <div>
-                      <p className="font-bold text-slate-200">{pos.tokenSymbol}</p>
-                      <p className="font-mono text-[10px] text-slate-500">{pos.tokenAddress.slice(0, 8)}…{pos.tokenAddress.slice(-6)}</p>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-3.5">
+                {wallet.tokens!.map((t, i, arr) => (
+                  <div key={t.mint} className={`flex items-center justify-between gap-3 py-3 ${i < arr.length - 1 ? "border-b border-slate-800/70" : ""}`}>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold text-slate-200">{t.symbol}</p>
+                      <p className="truncate font-mono text-[11px] text-slate-500">
+                        {fmtTokenAmount(t.amount)}
+                        {t.priceUsd != null && <span> · @ ${t.priceUsd < 0.0001 ? t.priceUsd.toExponential(2) : t.priceUsd.toFixed(6)}</span>}
+                      </p>
                     </div>
-                    <div className="text-right">
-                      <p className="font-mono text-sm text-slate-300">{pos.amountSOL.toFixed(4)} SOL</p>
-                      <p className="font-mono text-xs text-slate-500">Entry: ${pos.entryPriceUsd.toFixed(6)}</p>
-                    </div>
+                    <p className="shrink-0 font-mono text-sm font-bold text-slate-100">{t.valueUsd != null ? fmtUsdValue(t.valueUsd) : "—"}</p>
                   </div>
                 ))}
               </div>
             )}
           </div>
 
-          {/* Recent Activity */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/20 p-4">
-            <h3 className="mb-4 font-mono text-xs font-bold uppercase tracking-widest text-slate-400">Position History</h3>
-            {wallet?.recentActivity?.length === 0 ? (
-              <div className="py-8 text-center">
-                <p className="text-sm text-slate-600">No history yet.</p>
+          {/* Open positions */}
+          <div>
+            <h3 className="mb-2 font-mono text-[10px] font-bold uppercase tracking-widest text-slate-500">
+              Open positions · {openPositions.length}
+            </h3>
+            {openPositions.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-800 py-6 text-center">
+                <p className="text-sm text-slate-600">No open positions.</p>
+                <p className="mt-1 text-xs text-slate-700">Use Buy on a discovered token to open a trade.</p>
               </div>
             ) : (
-              <div className="flex flex-col gap-0">
-                {wallet?.recentActivity?.map((act) => (
-                  <div key={act.id} className="flex items-center justify-between border-b border-slate-800/60 py-3 last:border-0">
-                    <div className="flex items-center gap-3">
-                      <div className={`flex h-8 w-8 items-center justify-center rounded-full ${act.status === 'OPEN' ? 'bg-emerald-950/50 text-emerald-500' : 'bg-rose-950/50 text-rose-500'}`}>
-                        {act.status === 'OPEN' ? <IconArrowDownLeft size={14} /> : <IconArrowUpRight size={14} />}
+              <div className="flex flex-col gap-2">
+                {openPositions.map((pos) => {
+                  const mult = markFor(pos.tokenAddress)?.multiple ?? null;
+                  const up = mult != null && mult >= 1;
+                  // Decorative relative-strength bar (not an exact percentage of anything): distance from 1× scaled so ±100% fills it.
+                  const fill = mult == null ? 0 : Math.min(100, Math.max(6, Math.abs(mult - 1) * 100));
+                  return (
+                    <div key={pos.id} className="rounded-xl border border-slate-800 bg-slate-900/40 px-3.5 py-3">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-200">{pos.tokenSymbol}</span>
+                        <span className={`font-mono text-sm font-bold ${mult == null ? "text-slate-500" : up ? "text-emerald-400" : "text-rose-400"}`}>
+                          {mult == null ? "—" : `${mult.toFixed(2)}×`}
+                        </span>
                       </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-300">
-                          {act.status === 'OPEN' ? 'Bought' : 'Sold'} {act.tokenSymbol}
+                      <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-800">
+                        <div
+                          className={`h-full rounded-full ${up ? "bg-emerald-500" : "bg-rose-500"}`}
+                          style={{ width: `${fill}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Recent activity */}
+          <div id="wallet-activity">
+            <h3 className="mb-2 font-mono text-[10px] font-bold uppercase tracking-widest text-slate-500">Recent activity</h3>
+            {recent.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-800 py-6 text-center">
+                <p className="text-sm text-slate-600">No activity yet.</p>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-3.5">
+                {recent.map((row, i) => {
+                  const s = ACTIVITY_STYLE[row.type];
+                  const Icon = s.icon;
+                  return (
+                    <div key={row.key} className={`flex items-center gap-3 py-3 ${i < recent.length - 1 ? "border-b border-slate-800/70" : ""}`}>
+                      <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${s.badge}`}>
+                        <Icon size={15} />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-slate-200">{row.title}</p>
+                        <p className="truncate text-xs text-slate-500">
+                          {[row.detail, timeAgo(row.at)].filter(Boolean).join(" · ")}
                         </p>
-                        <p className="font-mono text-xs text-slate-500">{new Date(act.timestamp).toLocaleString()}</p>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <p className="font-mono text-sm font-bold text-slate-200">
-                        {act.amountSOL.toFixed(4)} SOL
-                      </p>
-                      <p className="font-mono text-[10px] text-slate-500">@ ${act.entryPriceUsd.toExponential(2)}</p>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

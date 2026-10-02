@@ -40,7 +40,9 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    return NextResponse.json({ tokens, count: tokens.length });
+    // `count` is the page size (kept for existing callers); `total` is every tracked token.
+    const total = await prisma.degenHunterRecentToken.count();
+    return NextResponse.json({ tokens, count: tokens.length, total });
   } catch (error) {
     console.error("[api/agents/degen-hunter/feed] Error:", error);
     return NextResponse.json({ error: "Failed to fetch token feed" }, { status: 500 });

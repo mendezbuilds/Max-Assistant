@@ -30,7 +30,12 @@ export function WatchlistView({ onOpenDetails }: { onOpenDetails: (token: Dashbo
     }
   }
 
-  useEffect(() => { fetchEntries(); }, []);
+  // Load once, then keep itself current (skipped while the tab is hidden).
+  useEffect(() => {
+    fetchEntries();
+    const t = setInterval(() => { if (document.visibilityState === "visible") fetchEntries(); }, 30_000);
+    return () => clearInterval(t);
+  }, []);
 
   const handleRefresh = () => {
     refresh();

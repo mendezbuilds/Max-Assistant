@@ -83,10 +83,15 @@ export interface DegenToken {
   riskScore?: number;
   totalScore?: number;
 
-  // Risk tracking
+  // Risk tracking. All of this is produced by assessRisk() (@max/shared) from the
+  // fields above: the level is DERIVED FROM riskFlags, so they can't disagree, and
+  // every level above "low" has at least one flag/warning explaining it.
   riskFlags: string[];
   warnings: string[];
   evidence: string[];
+  riskLevel?: "low" | "medium" | "high" | "critical";
+  /** Checks that could not be run (so "no flag" there means unknown, not fine). */
+  riskUnverified?: string[];
 
   // Metadata
   discoverySource: string;

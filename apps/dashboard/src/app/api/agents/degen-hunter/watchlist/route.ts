@@ -83,6 +83,24 @@ export async function POST(req: NextRequest) {
       create: { chatId, tokenAddress },
     });
 
+    // Record the price at the moment of adding — the "1×" that the watchlist's
+    // X-milestone and rug alerts measure against (see core's watchlistMonitor).
+    // Only fills a missing baseline, so re-watching never resets it. Raw SQL
+    // because these columns postdate the generated Prisma client.
+    try {
+      const row = await prisma.degenHunterRecentToken.findFirst({
+        where: { tokenData: { contains: tokenAddress } },
+        orderBy: { updatedAt: "desc" },
+      });
+      const price = row ? Number((JSON.parse(row.tokenData) as { priceUsd?: number }).priceUsd) : NaN;
+      if (price > 0) {
+        await prisma.$executeRawUnsafe(
+          `UPDATE "DegenHunterWatchlist" SET baselinePriceUsd = ? WHERE chatId = ? AND tokenAddress = ? AND baselinePriceUsd IS NULL`,
+          price, chatId, tokenAddress
+        );
+      }
+    } catch { /* no baseline now; core picks one up on its next scan */ }
+
     // Fire global alert
     await prisma.activityLog.create({
       data: {

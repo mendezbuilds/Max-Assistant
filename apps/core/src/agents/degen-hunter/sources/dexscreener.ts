@@ -137,6 +137,15 @@ export const dexscreenerSource: TokenSource = {
   }
 };
 
+/**
+ * A finite number from a DexScreener field, whether it arrives as a number or as a
+ * numeric string (priceUsd is a string); undefined if it's missing or not numeric.
+ */
+function toNum(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /** Skip SOL/WSOL/USDC/USDT quote-side tokens — these aren't discoveries */
 function isWrappedNative(symbol: string | undefined): boolean {
   if (!symbol) return false;
@@ -179,8 +188,9 @@ function createDegenTokenFromPair(
       // Optional pair-specific fields
       pairAddress: pair.pairAddress,
 
-      // Price data (USD)
-      priceUsd: typeof pair.priceUsd === "number" ? pair.priceUsd : undefined,
+      // Price data (USD). DexScreener sends priceUsd as a STRING ("0.000006557"); the old
+      // `typeof === "number"` check discarded it every time, so no token ever had a price.
+      priceUsd: toNum(pair.priceUsd),
 
       // Market data
       marketCapUsd: typeof pair.marketCap === "number" ? pair.marketCap : undefined,
@@ -201,7 +211,7 @@ function createDegenTokenFromPair(
       buys1h: typeof pair.txns?.h1?.buys === "number" ? pair.txns.h1.buys : undefined,
       sells1h: typeof pair.txns?.h1?.sells === "number" ? pair.txns.h1.sells : undefined,
       buys24h: typeof pair.txns?.h24?.buys === "number" ? pair.txns.h24.buys : undefined,
-      sells24h: typeof pair.txns.h24.sells === "number" ? pair.txns.h24.sells : undefined,
+      sells24h: typeof pair.txns?.h24?.sells === "number" ? pair.txns.h24.sells : undefined,
 
       // Token age (derived from pair creation)
       tokenAgeMinutes,
@@ -229,10 +239,12 @@ function createDegenTokenFromPair(
       chartUrl: undefined,
       explorerUrl: undefined,
       socialLinks: undefined,
-      priceChange5m: undefined,
-      priceChange1h: undefined,
-      priceChange6h: undefined,
-      priceChange24h: undefined,
+      // DexScreener provides these ({ m5, h1, h6, h24 }, in %); they were hard-coded to undefined,
+      // which also meant the risk assessment's "price dumping" check could never fire.
+      priceChange5m: toNum(pair.priceChange?.m5),
+      priceChange1h: toNum(pair.priceChange?.h1),
+      priceChange6h: toNum(pair.priceChange?.h6),
+      priceChange24h: toNum(pair.priceChange?.h24),
       holders: undefined,
       holderGrowth: undefined,
       pairCreatedAt: pair.pairCreatedAt ? new Date(pair.pairCreatedAt).toISOString() : undefined,

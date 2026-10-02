@@ -123,6 +123,12 @@ model DegenHunterWatchlist {
   dexLabel     String?  // DEX name/label (e.g. "Raydium")
   discoverySource String? // How it was discovered
   addedAt   DateTime @default(now())
+  // Performance tracking (watchlist alerts: "how many X" and rugged).
+  baselinePriceUsd Float?    // price when added (or first seen after adding); the "1×" every multiple is measured against
+  lastMultiple     Float?    // most recent price / baselinePriceUsd, refreshed on every scan
+  xAlertLevel      Int       @default(0) // how many X milestones (1.5×, 2×, 3×…) have already been alerted, so each fires once
+  dropAlerted      Boolean   @default(false) // the "down 50%" alert has fired
+  ruggedAt         DateTime? // set when the token is judged rugged; tracking stops
   @@unique([chatId, tokenAddress])
   @@index([chatId])
   @@index([tokenAddress])
@@ -160,9 +166,13 @@ model DegenHunterPosition {
   amountSOL    Decimal  // Amount of SOL invested
   entryPriceUsd Decimal // Token price in USD at time of buy
   status       String   @default("OPEN") // "OPEN" or "CLOSED"
+  // Realized PnL: filled in by sells (what a sell actually returned).
+  realizedSOL  Float     @default(0) // SOL received from every sell of this position so far (partial + final)
+  exitPriceUsd Float?    // price of the final sell that closed it; null while open
+  closedAt     DateTime? // when the final sell closed it; null while open
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
-  
+
   @@index([chatId])
   @@index([tokenAddress])
   @@index([status])
@@ -176,4 +186,13 @@ model DegenHunterRecentToken {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@index([tokenId])
+}
+// Brute-force lockout for the dashboard's login password. One row per scope
+// (currently a single global "dashboard-login" row). lockedUntil is epoch
+// milliseconds (BigInt) rather than a DateTime so the atomic claim in the
+// dashboard's login-lockout.ts can compare it in plain SQL.
+model LoginLockout {
+  key            String @id
+  failedAttempts Int    @default(0)
+  lockedUntil    BigInt?
 }

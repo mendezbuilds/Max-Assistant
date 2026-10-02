@@ -22,7 +22,17 @@ export async function expectedSessionToken(): Promise<string> {
   return sha256Hex(`${password}:${secret}`);
 }
 
+/**
+ * Compares the submitted password to DASHBOARD_PASSWORD without leaking how many
+ * leading characters matched: both are hashed to fixed-length digests first, then
+ * compared in constant time (a plain `===` returns at the first differing byte).
+ * Brute-force attempts are limited separately — see lib/login-lockout.ts.
+ */
 export async function checkPassword(candidate: string): Promise<boolean> {
   const password = process.env.DASHBOARD_PASSWORD ?? "";
-  return candidate.length > 0 && candidate === password;
+  if (candidate.length === 0 || password.length === 0) return false;
+  const [a, b] = await Promise.all([sha256Hex(candidate), sha256Hex(password)]);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ (b.charCodeAt(i) || 0);
+  return diff === 0;
 }

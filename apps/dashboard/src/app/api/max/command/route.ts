@@ -6,6 +6,38 @@ import { generateMaxReply } from "@/lib/groq";
 import { generateMaxSpeech } from "@/lib/tts";
 import { detectCoreCommand } from "@/lib/core-command";
 import { isCoreProcessRunning, startCore, stopCore } from "@/lib/core-control";
+import { detectAgentCommand, BUILT_AGENT_KEYS, type AgentCommand } from "@/lib/agent-command";
+
+/** Flips Agent.enabled the same way the dashboard toggle does (PATCH /api/agents/[key]). Deterministic confirmation text, never LLM-generated. Unbuilt agents are refused rather than flagged on, since a flag with no runner behind it would be a false "success". */
+async function handleAgentCommand({ action, keys }: AgentCommand): Promise<string> {
+  const enabled = action === "on";
+  const agents = await prisma.agent.findMany({ where: { key: { in: keys } } });
+  const changed: string[] = [];
+  const unchanged: string[] = [];
+  const unbuilt: string[] = [];
+
+  for (const agent of agents) {
+    if (enabled && !BUILT_AGENT_KEYS.has(agent.key)) {
+      unbuilt.push(agent.name);
+      continue;
+    }
+    if (agent.enabled === enabled) {
+      unchanged.push(agent.name);
+      continue;
+    }
+    await prisma.agent.update({ where: { key: agent.key }, data: { enabled, status: enabled ? "idle" : "disabled" } });
+    await prisma.activityLog
+      .create({ data: { agentKey: "system", level: "info", message: `${enabled ? "Enabled" : "Disabled"} ${agent.name} via MAX command` } })
+      .catch(() => {});
+    changed.push(agent.name);
+  }
+
+  const parts: string[] = [];
+  if (changed.length) parts.push(`${enabled ? "Enabled" : "Disabled"} ${changed.join(", ")}.`);
+  if (unchanged.length) parts.push(`${unchanged.join(", ")} already ${enabled ? "enabled" : "disabled"}.`);
+  if (unbuilt.length) parts.push(`${unbuilt.join(", ")} ${unbuilt.length > 1 ? "aren't" : "isn't"} built yet, so I left ${unbuilt.length > 1 ? "them" : "it"} off.`);
+  return parts.join(" ") || "No matching agents found.";
+}
 
 /**
  * Routes a typed command to MAX. Real Gemini text generation, grounded with
@@ -39,15 +71,19 @@ export async function POST(req: NextRequest) {
   // this is a real system action with a small, hardcoded phrase list (see
   // lib/core-command.ts), not something that should ever depend on an LLM
   // being reachable, or get bundled into that call's own error handling.
-  const coreAction = detectCoreCommand(input);
-  if (coreAction) {
+  // Agent enable/disable is checked before core: it requires an explicit agent
+  // name (or "all agents"), so "shut down Degen Hunter" is claimed here
+  // instead of falling into core's bare "shut down" pattern.
+  const agentCommand = detectAgentCommand(input);
+  const coreAction = agentCommand ? null : detectCoreCommand(input);
+  if (agentCommand || coreAction) {
     let spokenText: string;
     try {
-      spokenText = await handleCoreCommand(coreAction);
+      spokenText = agentCommand ? await handleAgentCommand(agentCommand) : await handleCoreCommand(coreAction!);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await prisma.activityLog.create({ data: { agentKey: "system", level: "error", message: `Core ${coreAction} command failed: ${message}` } }).catch(() => {});
-      return NextResponse.json({ spokenText: "MAX couldn't change core's state — try again.", targetAgentKey: null, audioDataUrl: null, error: true });
+      await prisma.activityLog.create({ data: { agentKey: "system", level: "error", message: `${agentCommand ? "Agent" : "Core"} command failed: ${message}` } }).catch(() => {});
+      return NextResponse.json({ spokenText: "MAX couldn't complete that command — try again.", targetAgentKey: null, audioDataUrl: null, error: true });
     }
     let audioDataUrl: string | null = null;
     try {

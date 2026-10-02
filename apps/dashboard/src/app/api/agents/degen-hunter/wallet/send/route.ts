@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@max/db";
+import { prisma, logActivity } from "@max/db";
 import { resolveDegenOwnerChatId } from "@/lib/degen-identity";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import bs58 from "bs58";
@@ -75,6 +75,7 @@ export async function POST(req: NextRequest) {
   try {
     const currentBalance = await connection.getBalance(keypair.publicKey);
     if (currentBalance < lamports + 5000) {
+      await recordWalletEvent("withdraw_failed", solAmount, "Insufficient balance");
       return NextResponse.json({ error: "Insufficient balance (including fees)" }, { status: 400 });
     }
 
@@ -90,9 +91,27 @@ export async function POST(req: NextRequest) {
       commitment: "confirmed"
     });
 
+    await recordWalletEvent("withdraw", solAmount, `to ${destination.slice(0, 4)}…${destination.slice(-4)}`);
     return NextResponse.json({ status: "success", txid });
   } catch (err: any) {
     console.error("[wallet/send] Error:", err.message);
+    await recordWalletEvent("withdraw_failed", solAmount, String(err.message).slice(0, 120));
     return NextResponse.json({ error: `Transaction failed: ${err.message}` }, { status: 400 });
   }
+}
+
+/**
+ * Persists a withdrawal (or failed attempt) so the wallet's Recent Activity
+ * can show it — positions only capture buys/sells. Records amount and a short
+ * detail only: never keys, PINs, or the full destination address. A logging
+ * failure must never mask the real result of the send.
+ */
+async function recordWalletEvent(kind: "withdraw" | "withdraw_failed", amountSOL: number, detail: string) {
+  const label = kind === "withdraw" ? "Withdraw" : "Withdraw failed";
+  await logActivity("degen-hunter", kind === "withdraw" ? "info" : "warn", `${label}: ${amountSOL} SOL (${detail})`, {
+    kind,
+    label,
+    detail,
+    amountSOL,
+  }).catch(() => {});
 }

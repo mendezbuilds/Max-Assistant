@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import { IconAlertTriangle, IconRefresh, IconSearch, IconFilter, IconShield } from "@tabler/icons-react";
 import { TokenCard } from "./TokenCard";
 import { useWatchlist } from "./useWatchlist";
+import { assess, riskTier } from "./risk";
 import type { DashboardToken } from "./types";
 
 type RiskFilter = "All" | "Low" | "Medium" | "High" | "Extreme";
@@ -52,20 +53,17 @@ export function RiskView({ onOpenDetails }: { onOpenDetails: (token: DashboardTo
     let unverified = 0;
 
     for (const t of tokens) {
-      const s = t.totalScore ?? 0;
-      
-      // Determine risk tier based on score or explicit flags
-      let tier = "Low";
-      if (t.riskFlags?.includes("extreme-risk")) tier = "Extreme";
-      else if (t.riskFlags?.includes("high-risk") || s < 45) tier = "High";
-      else if (s < 70) tier = "Medium";
+      // One assessment: the tier is derived from the flags. (This used to look for
+      // flag names nothing produces and treat a low opportunity score as high risk.)
+      const a = assess(t);
+      const tier = riskTier(t);
 
       if (tier === "High") high++;
       if (tier === "Extreme") extreme++;
-      
-      if (t.honeypotStatus === "honeypot-risk") honeypot++;
-      if (t.riskFlags?.includes("low-liquidity")) lowLiq++;
-      if (t.contractVerified === false || t.riskFlags?.includes("unverified-contract")) unverified++;
+
+      if (a.riskFlags.includes("honeypot-risk")) honeypot++;
+      if (a.riskFlags.includes("low-liquidity") || a.riskFlags.includes("thin-liquidity")) lowLiq++;
+      if (t.contractVerified === false) unverified++;
     }
 
     return { high, extreme, honeypot, lowLiq, unverified };
@@ -74,14 +72,7 @@ export function RiskView({ onOpenDetails }: { onOpenDetails: (token: DashboardTo
   // Filtering
   const filteredTokens = useMemo(() => {
     if (riskFilter === "All") return tokens;
-    return tokens.filter(t => {
-      const s = t.totalScore ?? 0;
-      let tier = "Low";
-      if (t.riskFlags?.includes("extreme-risk")) tier = "Extreme";
-      else if (t.riskFlags?.includes("high-risk") || s < 45) tier = "High";
-      else if (s < 70) tier = "Medium";
-      return tier === riskFilter;
-    });
+    return tokens.filter(t => riskTier(t) === riskFilter);
   }, [tokens, riskFilter]);
 
   return (

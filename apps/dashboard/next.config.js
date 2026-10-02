@@ -47,7 +47,7 @@ const nextConfig = {
   // trace/inline them, breaking at runtime. Marking them external tells
   // Next to leave these as plain require() calls resolved from
   // node_modules at runtime instead.
-  serverExternalPackages: ["onnxruntime-node", "@huggingface/transformers", "ffmpeg-static"],
+  serverExternalPackages: ["onnxruntime-node", "@huggingface/transformers", "ffmpeg-static", "@resvg/resvg-js"],
 };
 
 module.exports = nextConfig;

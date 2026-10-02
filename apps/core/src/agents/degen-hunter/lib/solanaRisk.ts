@@ -2,14 +2,14 @@
 // Solana blockchain risk analysis utilities
 
 import { fetchWithRetry } from "../../../lib/http";
+import { rpcEndpoint, redactRpc } from "./rpc";
 import { DegenToken } from "../types";
 
 // Cache for RPC responses within a single run to avoid duplicate requests
 const rpcCache = new Map<string, any>();
 
-// Solana RPC endpoint - using public mainnet-beta endpoint
-// Note: Public RPCs have rate limits; consider using a dedicated RPC key in production
-const SOLANA_RPC_ENDPOINT = process.env.SOLANA_RPC_ENDPOINT || "https://api.mainnet-beta.solana.com";
+// The RPC endpoint comes from rpc.ts, read at call time (see the note there: a
+// module-level constant here froze the public default and ignored SOLANA_RPC_ENDPOINT).
 
 /**
  * Make a Solana RPC call with caching and retry logic
@@ -31,7 +31,7 @@ async function solanaRpcCall(method: string, params: any[]): Promise<any> {
   };
 
   try {
-    const response = await fetchWithRetry(SOLANA_RPC_ENDPOINT, {
+    const response = await fetchWithRetry(rpcEndpoint(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -59,9 +59,10 @@ async function solanaRpcCall(method: string, params: any[]): Promise<any> {
 
     throw new Error('Invalid RPC response');
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
+    // Redacted: provider URLs carry the API key, and the raw error message includes the URL.
+    const msg = redactRpc(error instanceof Error ? error.message : String(error));
     console.warn(`[degen-hunter] Solana RPC call failed (${method}): ${msg}`);
-    throw error;
+    throw new Error(msg);
   }
 }
 
@@ -69,23 +70,24 @@ async function solanaRpcCall(method: string, params: any[]): Promise<any> {
  * Get mint authority and freeze authority for a SPL token mint address
  */
 export async function getTokenAuthorities(mintAddress: string): Promise<{
-  mintAuthority: string | null;
-  freezeAuthority: string | null;
+  /** null = renounced (a real, checked answer); undefined = the lookup failed, so unknown. */
+  mintAuthority: string | null | undefined;
+  freezeAuthority: string | null | undefined;
 }> {
+  // A failed lookup used to return null here, and null means "renounced = safe", so
+  // an RPC error was indistinguishable from a clean token. undefined keeps "couldn't
+  // check" separate from "checked and clear".
+  const unknown = { mintAuthority: undefined, freezeAuthority: undefined };
   try {
     const accountInfo = await solanaRpcCall("getAccountInfo", [
       mintAddress,
       { encoding: "jsonParsed" },
     ]);
 
-    if (!accountInfo || !accountInfo.value) {
-      return { mintAuthority: null, freezeAuthority: null };
-    }
+    if (!accountInfo || !accountInfo.value) return unknown;
 
     const parsed = accountInfo.value.data.parsed;
-    if (!parsed || !parsed.info) {
-      return { mintAuthority: null, freezeAuthority: null };
-    }
+    if (!parsed || !parsed.info) return unknown;
 
     const info = parsed.info;
 
@@ -96,7 +98,7 @@ export async function getTokenAuthorities(mintAddress: string): Promise<{
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.warn(`[degen-hunter] Failed to get authorities for ${mintAddress}: ${msg}`);
-    return { mintAuthority: null, freezeAuthority: null };
+    return unknown;
   }
 }
 
@@ -301,8 +303,9 @@ export async function populateRiskData(token: DegenToken): Promise<DegenToken> {
   try {
     // Get mint and freeze authorities
     const authorities = await getTokenAuthorities(token.contractAddress);
-    token.mintAuthorityActive = authorities.mintAuthority !== null;
-    token.freezeAuthorityActive = authorities.freezeAuthority !== null;
+    // Only record what was actually checked; leave unknown as unknown.
+    if (authorities.mintAuthority !== undefined) token.mintAuthorityActive = authorities.mintAuthority !== null;
+    if (authorities.freezeAuthority !== undefined) token.freezeAuthorityActive = authorities.freezeAuthority !== null;
 
     // Get holder concentration (optional, may be expensive)
     const holderData = await getHolderConcentration(token.contractAddress);
@@ -329,52 +332,9 @@ export async function populateRiskData(token: DegenToken): Promise<DegenToken> {
     // Calculate risk score
     token.riskScore = calculateRiskScore(token);
 
-    // Add risk flags and warnings based on analysis
-    if (token.mintAuthorityActive) {
-      token.riskFlags.push("mint-authority-active");
-      token.warnings.push("Mint authority is not renounced");
-      token.evidence.push("Solana RPC: mint authority present");
-    }
-
-    if (token.freezeAuthorityActive) {
-      token.riskFlags.push("freeze-authority-active");
-      token.warnings.push("Freeze authority is not renounced");
-      token.evidence.push("Solana RPC: freeze authority present");
-    }
-
-    if (token.topHolderConcentration !== undefined && token.topHolderConcentration > 50) {
-      token.riskFlags.push("high-holder-concentration");
-      token.warnings.push(`Top holders control ${token.topHolderConcentration}% of supply`);
-      token.evidence.push(`Solana RPC: holder concentration analysis`);
-    }
-
-    if (token.liquidityLocked === false) {
-      token.riskFlags.push("liquidity-unlocked");
-      token.warnings.push("Liquidity is not locked");
-      token.evidence.push("Liquidity lock check: not locked");
-    }
-
-    if (token.honeypotStatus === "honeypot-risk") {
-      token.riskFlags.push("honeypot-risk");
-      token.warnings.push("Token exhibits honeypot characteristics");
-      token.evidence.push("Buy/sell tax analysis indicates honeypot risk");
-    } else if (token.honeypotStatus === "suspicious") {
-      token.riskFlags.push("honeypot-risk");
-      token.warnings.push("Token shows suspicious tax characteristics");
-      token.evidence.push("Buy/sell tax analysis indicates suspicious taxes");
-    }
-
-    if (token.buyTaxPercent !== undefined && token.buyTaxPercent > 10) {
-      token.riskFlags.push("tax-risk");
-      token.warnings.push(`Buy tax is ${token.buyTaxPercent}%`);
-      token.evidence.push("Buy tax analysis");
-    }
-
-    if (token.sellTaxPercent !== undefined && token.sellTaxPercent > 10) {
-      token.riskFlags.push("tax-risk");
-      token.warnings.push(`Sell tax is ${token.sellTaxPercent}%`);
-      token.evidence.push("Sell tax analysis");
-    }
+    // Risk flags, warnings and the risk level are NOT assigned here. They are derived in one place,
+    // assessRisk() (@max/shared), from the data gathered above plus the market data — so the level
+    // can never disagree with the flags. See applyRiskAssessment() in ../index.ts.
 
     // Note: We don't have contract verification data from DexScreener, so we leave it undefined
     // In a later phase we could integrate with explorers to get contract verification status

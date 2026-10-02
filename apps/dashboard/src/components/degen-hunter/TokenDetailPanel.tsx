@@ -3,6 +3,8 @@
 import { IconX, IconExternalLink, IconAlertTriangle, IconShield } from "@tabler/icons-react";
 import type { DashboardToken } from "./types";
 import { TradePanel } from "./TradePanel";
+import { useTradable } from "./useTradable";
+import { assess, RISK_STYLE } from "./risk";
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -73,6 +75,11 @@ export function TokenDetailPanel({
   closing: boolean;
   onClose: () => void;
 }) {
+  // Can Jupiter route a buy of this token right now? Warn above the Buy box if not.
+  const mint = token?.contractAddress ?? "";
+  const route = useTradable(mint ? [mint] : [])[mint];
+  // Risk level, flags, warnings and evidence from the one shared assessment (the level is derived from the flags).
+  const risk = token ? assess(token) : null;
   return (
     <div
       className={`fixed right-0 top-0 z-40 h-full w-full max-w-sm overflow-hidden border-l border-slate-800 bg-slate-950/97 shadow-2xl backdrop-blur-md sm:max-w-md transition-transform duration-300 ${
@@ -107,6 +114,19 @@ export function TokenDetailPanel({
           <div className="flex flex-col gap-4">
 
             {/* Trading */}
+            {route && !route.tradable && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-900/50 bg-amber-950/20 p-3 text-xs text-amber-300">
+                <IconAlertTriangle size={15} className="mt-0.5 shrink-0" />
+                <p>
+                  <span className="font-bold">Not tradable yet.</span> {route.reason} A buy will fail until Jupiter can route it.
+                </p>
+              </div>
+            )}
+            {route?.tradable && route.priceImpactPct != null && route.priceImpactPct >= 5 && (
+              <div className="rounded-lg border border-amber-900/50 bg-amber-950/20 p-3 text-xs text-amber-300">
+                Heavy price impact (~{route.priceImpactPct.toFixed(1)}% on a 0.01 SOL buy): thin liquidity, so expect to get a worse price than shown.
+              </div>
+            )}
             <TradePanel token={token} />
 
             {/* 1. Market Data */}
@@ -166,12 +186,22 @@ export function TokenDetailPanel({
                 : <span className="text-rose-400">⚠ Unlocked</span>
               } />
 
+              {/* Risk level — derived from the flags below, so it always has its reasons */}
+              {risk && (
+                <div className="mt-3 flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+                  <span className="text-xs text-slate-500 font-mono">Risk level</span>
+                  <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${RISK_STYLE[(risk.level.toUpperCase() as keyof typeof RISK_STYLE)]}`}>
+                    {risk.level}{risk.level === "low" && risk.limitedChecks ? " · limited checks" : ""}
+                  </span>
+                </div>
+              )}
+
               {/* Risk flags */}
-              {(token.riskFlags?.length ?? 0) > 0 && (
+              {risk && risk.riskFlags.length > 0 && (
                 <div className="mt-3">
                   <p className="mb-1.5 text-xs text-slate-500 font-mono">Flags</p>
                   <div className="flex flex-wrap gap-1">
-                    {token.riskFlags!.map((f) => (
+                    {risk.riskFlags.map((f) => (
                       <span key={f} className="rounded bg-rose-950/50 border border-rose-900/40 px-1.5 py-0.5 text-[10px] text-rose-400">
                         <IconAlertTriangle size={10} className="inline mr-0.5" />{f}
                       </span>
@@ -181,11 +211,11 @@ export function TokenDetailPanel({
               )}
 
               {/* Warnings */}
-              {(token.warnings?.length ?? 0) > 0 && (
+              {risk && risk.warnings.length > 0 && (
                 <div className="mt-3">
                   <p className="mb-1.5 text-xs text-slate-500 font-mono">Warnings</p>
                   <ul className="flex flex-col gap-1">
-                    {token.warnings!.map((w, i) => (
+                    {risk.warnings.map((w, i) => (
                       <li key={i} className="text-xs text-amber-400">• {w}</li>
                     ))}
                   </ul>
@@ -193,15 +223,22 @@ export function TokenDetailPanel({
               )}
 
               {/* Evidence */}
-              {(token.evidence?.length ?? 0) > 0 && (
+              {risk && risk.evidence.length > 0 && (
                 <div className="mt-3">
                   <p className="mb-1.5 text-xs text-slate-500 font-mono">Evidence</p>
                   <ul className="flex flex-col gap-1">
-                    {token.evidence!.map((e, i) => (
+                    {risk.evidence.map((e, i) => (
                       <li key={i} className="text-xs text-slate-400">• {e}</li>
                     ))}
                   </ul>
                 </div>
+              )}
+
+              {/* What could NOT be checked: "no flag" on these means unknown, not fine */}
+              {risk && risk.unverified.length > 0 && (
+                <p className="mt-3 text-[11px] leading-snug text-slate-500">
+                  ℹ Not verified: {risk.unverified.join(", ")}. No flag on these means unknown, not safe.
+                </p>
               )}
             </Section>
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { getAgentVisual } from "@/lib/hq-config";
+import { getAgentVisual, ORBIT_AGENT_KEYS } from "@/lib/hq-config";
 import { ORBIT_BANK_DEG, ORBIT_TILT_Y_SCALE } from "@/lib/orbit-tilt";
 import { AgentNode } from "./AgentNode";
 import { MaxCore } from "./MaxCore";
@@ -27,11 +27,6 @@ const INNER_BAND: [number, number] = [0.22, 0.34];
 const OUTER_BAND: [number, number] = [0.44, 0.5];
 const INNER_DURATION_BASE = 28;
 const OUTER_DURATION_BASE = 34;
-const RECENT_ACTIVITY_MS = 24 * 60 * 60 * 1000;
-
-function hasRecentActivity(agent: AgentData): boolean {
-  return Boolean(agent.lastActionAt && Date.now() - new Date(agent.lastActionAt).getTime() < RECENT_ACTIVITY_MS);
-}
 
 /** Spreads `count` items evenly across [min, max]; a single item lands at the midpoint rather than at `min`. */
 function spread(index: number, count: number, [min, max]: [number, number]): number {
@@ -108,13 +103,13 @@ export function OrbitView({ agents, maxState, onNodeClick, onMaxClick, registerN
     return () => observer.disconnect();
   }, []);
 
-  // Only enabled agents orbit — a disabled one isn't rendered at all (not
-  // grayed out, not present-but-hidden), so the ring always reflects
-  // exactly the live count and re-spaces itself automatically as agents
-  // are enabled/disabled over time.
-  const enabledAgents = agents.filter((a) => a.enabled);
-  const innerAgents = enabledAgents.filter((a) => getAgentVisual(a.key).ring === "inner");
-  const outerAgents = enabledAgents.filter((a) => getAgentVisual(a.key).ring === "outer");
+  // Only the agents in ORBIT_AGENT_KEYS are drawn, on or off, so the ring
+  // stays put as they're toggled. What changes is the node itself: an enabled
+  // agent glows in its own color, a disabled one is dimmed with no glow (see
+  // AgentNode's `active`, driven by Agent.enabled below).
+  const orbitAgents = agents.filter((a) => ORBIT_AGENT_KEYS.includes(a.key));
+  const innerAgents = orbitAgents.filter((a) => getAgentVisual(a.key).ring === "inner");
+  const outerAgents = orbitAgents.filter((a) => getAgentVisual(a.key).ring === "outer");
 
   const cx = size / 2;
   const cy = size / 2;
@@ -224,7 +219,7 @@ export function OrbitView({ agents, maxState, onNodeClick, onMaxClick, registerN
           pathD={ellipsePath(cx, cy, o.radius, o.radius * ORBIT_TILT_Y_SCALE, o.clockwise)}
           durationSec={o.durationSec}
           delaySec={o.delaySec}
-          active={hasRecentActivity(o.agent)}
+          active={o.agent.enabled}
           onClick={() => onNodeClick(o.agent.key)}
           size={nodeSize}
           registerRef={(el) => registerNodeRef(o.agent.key, el)}

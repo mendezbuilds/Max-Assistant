@@ -13,6 +13,8 @@ import { CommandBar } from "./CommandBar";
 import { CallBar } from "./CallBar";
 import { BottomStatusStrip } from "./BottomStatusStrip";
 import { DegenDashboard } from "../degen-hunter/DegenDashboard";
+import { LiveAlertsStream } from "../degen-hunter/LiveAlertsStream";
+import { useLiveAlerts } from "../degen-hunter/useLiveAlerts";
 import { Toaster } from "./Toaster";
 import { useCallMode } from "./useCallMode";
 import { getAgentVisual } from "@/lib/hq-config";
@@ -83,7 +85,17 @@ export function HqDashboard({
     nodeRefs.current[key] = el;
   }, []);
 
+  // Owned here, above both the orbit sidebar and the dedicated screen, so the
+  // stream (and which cards already expired) survives navigating between them.
+  const { alerts: liveAlerts, dismiss: dismissLiveAlert } = useLiveAlerts();
+
   const beginZoom = useCallback((agentKey: string) => {
+    // Degen Hunter is a continuous stream, not a periodic report: it skips the
+    // Stage 2 zoom-to-terminal pattern and opens its own dedicated screen.
+    if (agentKey === "degen-hunter") {
+      setZoomedAgentKey(agentKey);
+      return;
+    }
     const containerRect = contentRef.current?.getBoundingClientRect();
     const nodeRect = nodeRefs.current[agentKey]?.getBoundingClientRect();
     const cw = containerRect?.width ?? window.innerWidth;
@@ -185,7 +197,7 @@ export function HqDashboard({
 
       <div ref={contentRef} className="relative flex flex-1 items-center justify-center overflow-hidden py-1">
         {zoomedAgentKey === "degen-hunter" ? (
-          <DegenDashboard onBack={handleBackToOrbit} />
+          <DegenDashboard onBack={handleBackToOrbit} alerts={liveAlerts} onDismissAlert={dismissLiveAlert} />
         ) : zoomedAgentKey ? (
           <AgentDetailScreen
             agentKey={zoomedAgentKey}
@@ -195,15 +207,30 @@ export function HqDashboard({
             }}
           />
         ) : (
-          <OrbitView
-            agents={agents}
-            maxState={callActive ? callPhase : speaking ? "speaking" : "idle"}
-            onNodeClick={beginZoom}
-            // A call is already active — tapping MAX's core mid-call
-            // shouldn't also fire the typed-style empty-text ping.
-            onMaxClick={callActive ? () => {} : () => handleMaxCommand("")}
-            registerNodeRef={registerNodeRef}
-          />
+          <div className="flex h-full w-full">
+            <div className="relative flex min-w-0 flex-1 items-center justify-center">
+              <OrbitView
+                agents={agents}
+                maxState={callActive ? callPhase : speaking ? "speaking" : "idle"}
+                onNodeClick={beginZoom}
+                // A call is already active — tapping MAX's core mid-call
+                // shouldn't also fire the typed-style empty-text ping.
+                onMaxClick={callActive ? () => {} : () => handleMaxCommand("")}
+                registerNodeRef={registerNodeRef}
+              />
+            </div>
+            {/* Always present on the main view (not toggled): Degen Hunter's live alert stream, slim variant. */}
+            <aside className="hidden w-[260px] shrink-0 flex-col lg:w-[300px] border-l border-jarvis-border/70 bg-slate-950/50 backdrop-blur-sm md:flex">
+              <div className="flex h-9 shrink-0 items-center gap-2 border-b border-jarvis-border/70 px-4">
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-75" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-orange-500" />
+                </span>
+                <h2 className="font-mono text-[10px] font-bold uppercase tracking-widest text-slate-400">Degen Hunter · Live</h2>
+              </div>
+              <LiveAlertsStream alerts={liveAlerts} onDismiss={dismissLiveAlert} variant="slim" />
+            </aside>
+          </div>
         )}
 
         {zoomTransition && (

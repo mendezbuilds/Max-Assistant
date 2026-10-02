@@ -74,8 +74,11 @@ export function hashPin(pin: string): string {
   return `${salt.toString("hex")}:${hash.toString("hex")}`;
 }
 
-/** Expects storedHash in format: salt:hash (both hex encoded). */
-export function verifyPin(pin: string, storedHash: string): boolean {
+/**
+ * Expects storedHash in format: salt:hash (both hex encoded). NOT exported on purpose: it checks a PIN with no
+ * attempt tracking, so calling it directly would bypass the brute-force lockout. Use verifyPinWithLockout.
+ */
+function verifyPin(pin: string, storedHash: string): boolean {
   try {
     const [saltHex, hashHex] = storedHash.split(":");
     if (!saltHex || !hashHex) return false;
@@ -122,51 +125,58 @@ export type PinCheckResult =
  * is never even checked — reason "locked" is returned immediately.
  */
 export async function verifyPinWithLockout(chatId: string, pin: string): Promise<PinCheckResult> {
-  const user = await prisma.degenHunterUser.findUnique({ where: { chatId } });
-  if (!user) return { ok: false, reason: "no_user" };
-  if (!user.pinHash) return { ok: false, reason: "no_pin_set" };
+  // Claiming an attempt is a compare-and-swap on the counter, and ONLY the caller that wins the claim is allowed to
+  // check the PIN. The previous version read the counter, checked the PIN, then wrote counter+1 — so N guesses
+  // sent at once all read "0 failures", all passed the lock check, and all were checked, while the counter only
+  // moved to 1 and no lock was ever set (tested: 200 simultaneous guesses → 200 checked, 0 locked). Here the
+  // claim is atomic: concurrent callers lose the swap, re-read the new counter/lock, and are rejected once the
+  // budget is spent. Retries are bounded; a caller starved by contention is rejected without being checked.
+  for (let tries = 0; tries < 25; tries++) {
+    const user = await prisma.degenHunterUser.findUnique({ where: { chatId } });
+    if (!user) return { ok: false, reason: "no_user" };
+    if (!user.pinHash) return { ok: false, reason: "no_pin_set" };
 
-  const now = new Date();
-  if (user.pinLockedUntil && user.pinLockedUntil > now) {
-    const retryInMinutes = Math.max(1, Math.ceil((user.pinLockedUntil.getTime() - now.getTime()) / 60000));
-    return { ok: false, reason: "locked", retryAt: user.pinLockedUntil, retryInMinutes };
-  }
-
-  const correct = verifyPin(pin, user.pinHash);
-
-  if (correct) {
-    if (user.pinFailedAttempts !== 0 || user.pinLockedUntil !== null) {
-      await prisma.degenHunterUser.update({
-        where: { chatId },
-        data: { pinFailedAttempts: 0, pinLockedUntil: null },
-      });
+    const now = new Date();
+    if (user.pinLockedUntil && user.pinLockedUntil > now) {
+      const retryInMinutes = Math.max(1, Math.ceil((user.pinLockedUntil.getTime() - now.getTime()) / 60000));
+      return { ok: false, reason: "locked", retryAt: user.pinLockedUntil, retryInMinutes };
     }
-    return { ok: true };
+
+    // This attempt would be failure number `next`. If that is the last one allowed, the lock is set as part of the
+    // claim itself (and the counter reset so the window after expiry starts fresh). The attempt that took the last
+    // slot is still checked below, and if it turns out to be the correct PIN the lock is cleared again.
+    const next = user.pinFailedAttempts + 1;
+    const locksNow = next >= PIN_MAX_ATTEMPTS;
+    const lockedUntil = locksNow ? new Date(now.getTime() + PIN_LOCKOUT_MS) : null;
+
+    const claimed = await prisma.degenHunterUser.updateMany({
+      where: { chatId, pinFailedAttempts: user.pinFailedAttempts, pinLockedUntil: user.pinLockedUntil },
+      data: { pinFailedAttempts: locksNow ? 0 : next, pinLockedUntil: lockedUntil },
+    });
+    if (claimed.count === 0) continue; // another attempt changed the counter first: re-read and re-decide
+
+    // We own this attempt slot, and the counter already reflects it.
+    if (verifyPin(pin, user.pinHash)) {
+      await prisma.degenHunterUser.updateMany({ where: { chatId }, data: { pinFailedAttempts: 0, pinLockedUntil: null } });
+      return { ok: true };
+    }
+
+    if (locksNow) {
+      // Never log the PIN value itself — only that a lockout occurred.
+      await prisma.activityLog
+        .create({
+          data: {
+            agentKey: "degen-hunter",
+            level: "warn",
+            message: `PIN locked for chatId ${chatId} after ${PIN_MAX_ATTEMPTS} consecutive failed attempts — locked until ${lockedUntil!.toISOString()}`,
+          },
+        })
+        .catch(() => {});
+    }
+
+    return { ok: false, reason: "incorrect", attemptsRemaining: locksNow ? 0 : PIN_MAX_ATTEMPTS - next, justLocked: locksNow };
   }
 
-  const failedAttempts = user.pinFailedAttempts + 1;
-  const justLocked = failedAttempts >= PIN_MAX_ATTEMPTS;
-  const lockedUntil = justLocked ? new Date(now.getTime() + PIN_LOCKOUT_MS) : null;
-
-  await prisma.degenHunterUser.update({
-    where: { chatId },
-    // Reset the counter itself once locked, so the next window after
-    // expiry starts fresh rather than immediately re-locking on attempt 1.
-    data: { pinFailedAttempts: justLocked ? 0 : failedAttempts, pinLockedUntil: lockedUntil },
-  });
-
-  if (justLocked) {
-    // Never log the PIN value itself — only that a lockout occurred.
-    await prisma.activityLog
-      .create({
-        data: {
-          agentKey: "degen-hunter",
-          level: "warn",
-          message: `PIN locked for chatId ${chatId} after ${PIN_MAX_ATTEMPTS} consecutive failed attempts — locked until ${lockedUntil!.toISOString()}`,
-        },
-      })
-      .catch(() => {});
-  }
-
-  return { ok: false, reason: "incorrect", attemptsRemaining: justLocked ? 0 : PIN_MAX_ATTEMPTS - failedAttempts, justLocked };
+  // Too much contention to claim a slot: reject without checking the PIN (fail closed).
+  return { ok: false, reason: "locked", retryAt: new Date(Date.now() + 60_000), retryInMinutes: 1 };
 }

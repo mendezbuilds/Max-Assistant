@@ -141,10 +141,10 @@ function AlertsList({ onClose }: { onClose: () => void }) {
     // Fetch initial batch
     const loadInitial = async () => {
       try {
-        const res = await fetch("/api/alerts");
+        const res = await fetch("/api/alerts?limit=50"); // the newest 50, not the oldest
         if (res.ok) {
           const data = await res.json();
-          setEntries(data);
+          setEntries([...data].reverse()); // newest first, matching how new items are added
           if (data.length > 0) setAfterId(data[data.length - 1].id);
         }
       } catch { /* non-fatal */ }

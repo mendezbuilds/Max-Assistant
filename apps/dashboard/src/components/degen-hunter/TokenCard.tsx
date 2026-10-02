@@ -1,6 +1,8 @@
 "use client";
 
 import { IconEye, IconBan, IconVolumeOff, IconInfoCircle, IconExternalLink } from "@tabler/icons-react";
+import { RISK_STYLE, riskTag, tokenWarnings, tokenUnverified } from "./risk";
+import { TradableBadge, type TradableInfo } from "./useTradable";
 import type { DashboardToken } from "./types";
 
 function fmt(n: number | undefined, decimals = 2, prefix = "") {
@@ -24,12 +26,6 @@ function fmtAge(minutes: number | undefined) {
   return `${(minutes / 1440).toFixed(1)}d`;
 }
 
-function riskStyle(level: string | undefined) {
-  if (level === "high") return "text-rose-400 bg-rose-950/40 border-rose-900/60";
-  if (level === "medium") return "text-amber-400 bg-amber-950/40 border-amber-900/60";
-  if (level === "low") return "text-emerald-400 bg-emerald-950/40 border-emerald-900/60";
-  return "text-slate-400 bg-slate-900/40 border-slate-800";
-}
 
 function scoreBg(score: number | undefined) {
   if (score == null) return "text-slate-500";
@@ -38,13 +34,6 @@ function scoreBg(score: number | undefined) {
   return "text-rose-400";
 }
 
-function riskLevel(token: DashboardToken): string | undefined {
-  const s = token.totalScore;
-  if (s == null) return undefined;
-  if (s >= 70) return "high";   // high opportunity = not "dangerous" but high signal
-  if (s >= 45) return "medium";
-  return "low";
-}
 
 export function TokenCard({
   token,
@@ -53,15 +42,25 @@ export function TokenCard({
   onIgnore,
   onMute,
   onDetails,
+  onBuy,
+  tradable,
 }: {
   token: DashboardToken;
   isWatched?: boolean;
   onWatch?: () => void;
+  /** Ignore / Mute buttons only render when a handler is supplied, so no card ever shows a button that does nothing. */
   onIgnore?: () => void;
   onMute?: () => void;
   onDetails?: () => void;
+  /** Opens the token's trade panel (the Buy box lives in the details panel). */
+  onBuy?: () => void;
+  /** Whether Jupiter can route a buy right now; shows a badge when known. */
+  tradable?: TradableInfo;
 }) {
-  const rl = riskLevel(token);
+  // The score (top right) is OPPORTUNITY; the pill is RISK, from the shared assessment. These used to
+  // be one thing — "high signal" shown in red from the same score — so a good token looked dangerous.
+  const risk = riskTag(token);
+  const reasons = tokenWarnings(token);
 
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-slate-800 bg-slate-900/40 p-4 transition-colors hover:border-slate-700">
@@ -103,9 +102,10 @@ export function TokenCard({
           <div className={`text-lg font-bold font-mono ${scoreBg(token.totalScore)}`}>
             {token.totalScore ?? "—"}<span className="text-xs text-slate-500">/100</span>
           </div>
-          <div className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${riskStyle(rl)}`}>
-            {rl ? `${rl} signal` : "Unscored"}
+          <div className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${RISK_STYLE[risk ?? "NONE"]}`}>
+            {risk ? `${risk} risk` : "Unscored"}
           </div>
+          <TradableBadge info={tradable} />
         </div>
       </div>
 
@@ -129,30 +129,30 @@ export function TokenCard({
         </div>
       </div>
 
-      {/* Security flags (quick inline) */}
-      {(token.mintAuthorityActive || token.freezeAuthorityActive || (token.riskFlags?.length ?? 0) > 0) && (
-        <div className="flex flex-wrap gap-1">
-          {token.mintAuthorityActive && (
-            <span className="rounded bg-rose-950/50 border border-rose-900/40 px-1.5 py-0.5 text-[10px] text-rose-400">⚠ Mint</span>
-          )}
-          {token.freezeAuthorityActive && (
-            <span className="rounded bg-rose-950/50 border border-rose-900/40 px-1.5 py-0.5 text-[10px] text-rose-400">⚠ Freeze</span>
-          )}
-          {token.riskFlags?.slice(0, 2).map((f) => (
-            <span key={f} className="rounded bg-amber-950/30 border border-amber-900/30 px-1.5 py-0.5 text-[10px] text-amber-400 truncate max-w-[120px]">
-              {f}
-            </span>
+      {/* Why the risk pill says what it says: the reasons behind the level (each has the real numbers). */}
+      {reasons.length > 0 && (
+        <div className="flex flex-col gap-0.5">
+          {reasons.slice(0, 2).map((w) => (
+            <p key={w} className="text-[11px] leading-snug text-amber-400/90">⚠ {w}</p>
           ))}
-          {(token.riskFlags?.length ?? 0) > 2 && (
-            <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-500">
-              +{(token.riskFlags?.length ?? 0) - 2} more
-            </span>
-          )}
+          {reasons.length > 2 && <p className="text-[10px] text-slate-500">+{reasons.length - 2} more in Details</p>}
         </div>
+      )}
+      {/* What couldn't be checked: "no flag" on these means unknown, not safe */}
+      {tokenUnverified(token).length > 0 && (
+        <p className="text-[10px] leading-snug text-slate-600">ℹ Not verified: {tokenUnverified(token).join(", ")}</p>
       )}
 
       {/* Action Buttons */}
       <div className="mt-1 flex flex-wrap gap-2">
+        {onBuy && (
+          <button
+            onClick={onBuy}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-orange-600 py-1.5 text-xs font-bold text-white transition-colors hover:bg-orange-500"
+          >
+            Buy
+          </button>
+        )}
         <button
           onClick={onDetails}
           className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-slate-800 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:bg-slate-700"
@@ -180,20 +180,24 @@ export function TokenCard({
             <IconExternalLink size={14} />
           </a>
         )}
-        <button
-          onClick={onIgnore}
-          className="flex items-center justify-center rounded-lg bg-slate-800 px-3 py-1.5 text-slate-400 transition-colors hover:bg-slate-700 hover:text-slate-200"
-          title="Ignore token"
-        >
-          <IconBan size={14} />
-        </button>
-        <button
-          onClick={onMute}
-          className="flex items-center justify-center rounded-lg bg-slate-800 px-3 py-1.5 text-slate-400 transition-colors hover:bg-slate-700 hover:text-slate-200"
-          title="Mute alerts"
-        >
-          <IconVolumeOff size={14} />
-        </button>
+        {onIgnore && (
+          <button
+            onClick={onIgnore}
+            className="flex items-center justify-center rounded-lg bg-slate-800 px-3 py-1.5 text-slate-400 transition-colors hover:bg-slate-700 hover:text-slate-200"
+            title="Ignore token (hide it from Discover)"
+          >
+            <IconBan size={14} />
+          </button>
+        )}
+        {onMute && (
+          <button
+            onClick={onMute}
+            className="flex items-center justify-center rounded-lg bg-slate-800 px-3 py-1.5 text-slate-400 transition-colors hover:bg-slate-700 hover:text-slate-200"
+            title="Mute alerts"
+          >
+            <IconVolumeOff size={14} />
+          </button>
+        )}
       </div>
     </div>
   );

@@ -79,6 +79,29 @@ const FALLBACK_VISUAL: AgentVisual = {
   sourceCount: 0,
 };
 
+/**
+ * Agents drawn on the orbit. The roster has 18, but only these have code
+ * behind them; drawing the rest just crowds the ring. Display-only: the other
+ * agents still exist in the DB and roster, and adding a key here is all it
+ * takes to put a newly-built agent on the orbit.
+ */
+export const ORBIT_AGENT_KEYS = ["job-scout", "alpha-scout", "degen-hunter"];
+
+/**
+ * A brighter tint of a node's own color, for its glow. The node fills are
+ * deliberately dark (~700 shades), and a dark color's glow on a dark
+ * background is barely visible — so the glow mixes the same hue toward white
+ * rather than reusing the fill color directly.
+ */
+export function glowColor(hex: string, towardWhite = 0.4): string {
+  const n = parseInt(hex.slice(1), 16);
+  const mix = (c: number) => Math.round(c + (255 - c) * towardWhite);
+  const r = mix((n >> 16) & 255);
+  const g = mix((n >> 8) & 255);
+  const b = mix(n & 255);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 export function getAgentVisual(key: string): AgentVisual {
   return AGENT_VISUALS[key] ?? FALLBACK_VISUAL;
 }

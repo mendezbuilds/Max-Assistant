@@ -8,6 +8,8 @@ import { DegenToken } from "./types";
 import { DEFAULT_DISCOVERY_PROFILES, SCORING_WEIGHTS, RISK_THRESHOLDS } from "./config";
 import { populateRiskData } from "./lib/solanaRisk";
 import { sendTokenAlert, startBot } from "./telegram/bot";
+import { checkTracked } from "./lib/watchlistMonitor";
+import { assessRisk, formatPrice } from "@max/shared";
 import { notify } from "../../telegram";
 
 const AGENT_KEY = "degen-hunter";
@@ -37,33 +39,28 @@ function calculateScore(token: DegenToken): number {
 }
 
 /**
- * Assign risk level based on score and thresholds
- * Now uses the actual score (totalScore) and thresholds from config
- */
-function getRiskLevel(score: number): "low" | "medium" | "high" {
-  if (score >= RISK_THRESHOLDS.strongSignal) return "high";
-  if (score >= RISK_THRESHOLDS.worthMonitoring) return "medium";
-  return "low";
-}
-
-/**
  * Generate a basic Telegram alert message for a token
  * In Phase 2, we create a simple placeholder - actual formatting in Phase 5
  */
 export function generateTokenAlert(token: DegenToken): string {
   const score = calculateScore(token);
-  const riskLevel = getRiskLevel(score);
+  // Risk comes from assessRisk (derived from the flags), not from the opportunity
+  // score: the old getRiskLevel(score) printed "Risk: HIGH" for any score ≥ 90.
+  const risk = assessRisk(token);
+  const riskLevel = risk.level;
 
   return [
     "🔥 DEGEN HUNTER ALERT",
     `Token: ${token.name} ($${token.symbol})`,
     `Chain: ${token.chain}`,
-    `Price: $${token.priceUsd?.toFixed(6) ?? "unknown"}`,
+    `Price: ${formatPrice(token.priceUsd)}`,
     `Market Cap: $${token.marketCapUsd?.toLocaleString() ?? "unknown"}`,
     `Liquidity: $${token.liquidityUsd?.toLocaleString() ?? "unknown"}`,
     `Volume 24h: $${token.volume24hUsd?.toLocaleString() ?? "unknown"}`,
     `Score: ${score}/100`,
     `Risk: ${riskLevel.toUpperCase()}`,
+    ...risk.warnings.slice(0, 4).map((w) => `  • ${w}`),
+    risk.unverified.length ? `Not verified: ${risk.unverified.join(", ")}` : "",
     "",
     "This is a high-risk speculative token. Verify details before acting.",
     "Not financial advice. DYOR."
@@ -74,6 +71,41 @@ export function generateTokenAlert(token: DegenToken): string {
  * Compute and store all component scores and totalScore on the token
  * Returns the totalScore
  */
+/**
+ * Writes the token's risk level, flags, warnings and evidence from assessRisk().
+ * Overwrites whatever was there: those fields used to be filled by a few on-chain
+ * checks only, while a separate "risk level" came from the opportunity score, so
+ * the two could disagree ("High risk" with no flags). Now there's one derivation.
+ */
+export function applyRiskAssessment(token: DegenToken): void {
+  const a = assessRisk(token);
+  token.riskFlags = a.riskFlags;
+  token.warnings = a.warnings;
+  token.evidence = a.evidence;
+  token.riskLevel = a.level;
+  token.riskUnverified = a.unverified;
+}
+
+/**
+ * Maps a value to a 0-100 score using tiers sorted from highest `min` to lowest:
+ * at or above the top tier it's that tier's score; anywhere else it's interpolated
+ * between the tier the value sits in and the one ABOVE it, so it can never exceed
+ * the tier above's score. (This replaces three copies of a loop that interpolated
+ * against the tier BELOW using a position that was always ≥ 1, which inflated every
+ * score and pushed large values far past 100 — "Score: 102/100".)
+ */
+function interpolateTiers(value: number, tiers: { min: number; score: number }[]): number {
+  for (let i = 0; i < tiers.length; i++) {
+    const lower = tiers[i];
+    if (value < lower.min) continue;
+    const upper = tiers[i - 1]; // the next tier up (undefined when `lower` is the top tier)
+    if (!upper) return lower.score;
+    const position = (value - lower.min) / (upper.min - lower.min); // 0..1
+    return Math.round(lower.score + position * (upper.score - lower.score));
+  }
+  return tiers[tiers.length - 1]?.score ?? 0;
+}
+
 function computeAndStoreScores(token: DegenToken): number {
   // Compute each component score (0-100)
   const liquidityScore = computeLiquidityScore(token.liquidityUsd);
@@ -106,8 +138,8 @@ function computeAndStoreScores(token: DegenToken): number {
     socialScore * SCORING_WEIGHTS.socialCommunity / 100 +
     dataScore * SCORING_WEIGHTS.dataConfidence / 100;
 
-  // Store totalScore
-  token.totalScore = Math.round(totalScore);
+  // Store totalScore (always 0-100, whatever the components did)
+  token.totalScore = Math.min(100, Math.max(0, Math.round(totalScore)));
 
   return token.totalScore;
 }
@@ -129,20 +161,7 @@ function computeLiquidityScore(liquidityUsd: number | undefined): number {
     { min: 0, score: 0 }          // No liquidity
   ];
 
-  for (const tier of tiers) {
-    if (liquidityUsd >= tier.min) {
-      // Linear interpolation between tiers
-      const nextTier = tiers.find(t => t.min < tier.min);
-      if (!nextTier) return tier.score;
-
-      const range = tier.min - nextTier.min;
-      const scoreRange = tier.score - nextTier.score;
-      const position = (liquidityUsd - nextTier.min) / range;
-      return Math.round(nextTier.score + position * scoreRange);
-    }
-  }
-
-  return 0;
+  return interpolateTiers(liquidityUsd, tiers);
 }
 
 /**
@@ -161,19 +180,7 @@ function computeVolumeScore(volume24hUsd: number | undefined): number {
     { min: 0, score: 0 }          // No volume
   ];
 
-  for (const tier of tiers) {
-    if (volume24hUsd >= tier.min) {
-      const nextTier = tiers.find(t => t.min < tier.min);
-      if (!nextTier) return tier.score;
-
-      const range = tier.min - nextTier.min;
-      const scoreRange = tier.score - nextTier.score;
-      const position = (volume24hUsd - nextTier.min) / range;
-      return Math.round(nextTier.score + position * scoreRange);
-    }
-  }
-
-  return 0;
+  return interpolateTiers(volume24hUsd, tiers);
 }
 
 /**
@@ -257,19 +264,7 @@ function computeHolderScore(holderGrowth: number | undefined): number {
     { min: -100, score: 0 }     // Rapid decline
   ];
 
-  for (const tier of tiers) {
-    if (holderGrowth >= tier.min) {
-      const nextTier = tiers.find(t => t.min < tier.min);
-      if (!nextTier) return tier.score;
-
-      const range = tier.min - nextTier.min;
-      const scoreRange = tier.score - nextTier.score;
-      const position = (holderGrowth - nextTier.min) / range;
-      return Math.round(nextTier.score + position * scoreRange);
-    }
-  }
-
-  return 0;
+  return interpolateTiers(holderGrowth, tiers);
 }
 
 /**
@@ -400,6 +395,15 @@ function computeDataScore(token: DegenToken): number {
 export async function runDegenHunter(): Promise<void> {
   log(AGENT_KEY, "info", "Starting Degen Hunter scan...");
 
+  // Watchlist performance (X milestones / rugs). Runs first and on every scan,
+  // independent of whether the scan below finds anything new, and a failure
+  // here must never stop token discovery.
+  try {
+    await checkTracked();
+  } catch (err) {
+    log(AGENT_KEY, "warn", `Watchlist check failed: ${(err as Error).message}`);
+  }
+
   const allTokens: DegenToken[] = [];
 
   // Fetch tokens from all sources
@@ -449,6 +453,10 @@ export async function runDegenHunter(): Promise<void> {
     // Compute and store scores (this will populate totalScore and component scores)
     const score = computeAndStoreScores(token);
 
+    // The risk level, flags, warnings and evidence — all from one assessment, so
+    // the level is derived from the flags and can't disagree with them.
+    applyRiskAssessment(token);
+
     const alertMessage = generateTokenAlert(token);
     alertsToSend.push({ token, message: alertMessage });
     
@@ -457,14 +465,14 @@ export async function runDegenHunter(): Promise<void> {
       // 1. New token alert
       publishAlert("degen-hunter", "new_token", `New Discovery: ${token.symbol} (${token.totalScore}/100)`, "info", { token });
       
-      // 2. Risk alerts for extreme cases
-      const flags = token.riskFlags ?? [];
-      if (token.honeypotStatus === "honeypot-risk") {
-        publishAlert("degen-hunter", "critical", `Honeypot Risk: ${token.symbol}`, "error", { token });
-      } else if (flags.includes("extreme-risk") || (token.totalScore !== undefined && token.totalScore < 20)) {
-        publishAlert("degen-hunter", "critical", `Extreme Risk: ${token.symbol}`, "error", { token });
-      } else if (flags.includes("high-risk") || (token.totalScore !== undefined && token.totalScore < 45)) {
-        publishAlert("degen-hunter", "risk_change", `High Risk Token: ${token.symbol}`, "warn", { token });
+      // 2. Risk alerts, from the derived risk level (and the reason behind it). This
+      // used to look for flag names nothing ever produced ("extreme-risk"/"high-risk")
+      // and treat a LOW opportunity score as "high risk".
+      const why = token.warnings?.[0] ? ` — ${token.warnings[0]}` : "";
+      if (token.riskLevel === "critical") {
+        publishAlert("degen-hunter", "critical", `Critical Risk: ${token.symbol}${why}`, "error", { token });
+      } else if (token.riskLevel === "high") {
+        publishAlert("degen-hunter", "risk_change", `High Risk Token: ${token.symbol}${why}`, "warn", { token });
       }
 
       // 3. MAX bridge: send a deep-link alert via the MAX main bot
@@ -474,7 +482,7 @@ export async function runDegenHunter(): Promise<void> {
       const maxBridgeMsg =
         `🔥 *Degen Hunter Alert*\n` +
         `*${token.name}* ($${token.symbol}) — Score: ${score}/100\n` +
-        `Price: $${token.priceUsd?.toFixed(6) ?? "?"} | MC: $${token.marketCapUsd?.toLocaleString() ?? "?"}\n` +
+        `Price: ${formatPrice(token.priceUsd)} | MC: $${token.marketCapUsd?.toLocaleString() ?? "?"}\n` +
         `Tap below to trade in Degen Hunter 👇`;
       notify(maxBridgeMsg, {
         reply_markup: {

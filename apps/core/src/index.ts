@@ -16,9 +16,16 @@ import { createBot, notifyOnBoot, startBot } from "./telegram";
 import { startScheduler } from "./scheduler";
 import { log } from "./logger";
 import { startBot as startDegenHunterBot } from "./agents/degen-hunter/telegram/bot";
+import { rpcHost } from "./agents/degen-hunter/lib/rpc";
 
 async function main() {
   console.log("Starting Max core...");
+
+  // Print the RPC endpoint core will actually use (host only — provider URLs carry the API key).
+  // This is read lazily at call time; a configured endpoint that never shows up here isn't being loaded.
+  const rpc = rpcHost();
+  console.log(`[solana] RPC endpoint: ${rpc}${rpc === "api.mainnet-beta.solana.com" ? " (PUBLIC default — rate-limited; set SOLANA_RPC_ENDPOINT)" : ""}`);
+  log("system", "info", `Solana RPC endpoint: ${rpc}`).catch(() => {});
 
   const telegramToken = optionalEnv("TELEGRAM_BOT_TOKEN");
   if (telegramToken) {

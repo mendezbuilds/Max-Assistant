@@ -9,14 +9,23 @@ import { AGENT_RUNNERS } from "./agents/registry";
  * something. Errors are caught per-agent so one agent misbehaving can't take
  * the whole scheduler down.
  */
+// Agents whose run is still in flight. Cron fires on the clock regardless of
+// whether the previous run finished, so a slow run (retrying sources) on a
+// short interval would otherwise stack a second copy on top of itself.
+const running = new Set<string>();
+
 async function runIfEnabled(agentKey: string, run: () => Promise<void>) {
   const agent = await prisma.agent.findUnique({ where: { key: agentKey } });
   if (!agent?.enabled) return;
+  if (running.has(agentKey)) return;
 
+  running.add(agentKey);
   try {
     await run();
   } catch (err) {
     await log(agentKey, "error", `Run failed: ${(err as Error).message}`);
+  } finally {
+    running.delete(agentKey);
   }
 }
 
@@ -72,8 +81,11 @@ export function startScheduler() {
   // as alpha-scout, same judgment-call reasoning.
   cron.schedule("*/20 * * * *", () => runIfEnabled("wl-hunter", AGENT_RUNNERS["wl-hunter"]));
 
-  // Degen Hunter token discovery - every 20 minutes for frequent crypto opportunities
-  cron.schedule("*/20 * * * *", () => runIfEnabled("degen-hunter", AGENT_RUNNERS["degen-hunter"]));
+  // Degen Hunter token discovery. New-token launches move in minutes, so this
+  // scans far more often than the other agents (was every 20 min). Safe on
+  // DexScreener's free limits (a handful of calls per scan) and the guard in
+  // runIfEnabled stops a slow scan from overlapping the next one. Tune here.
+  cron.schedule("*/3 * * * *", () => runIfEnabled("degen-hunter", AGENT_RUNNERS["degen-hunter"]));
 
   setInterval(checkManualTriggers, 10_000);
 

@@ -15,9 +15,16 @@
     "trigger:job-scout": "npm run trigger --workspace=@max/core -- job-scout",
     "trigger:alpha-scout": "npm run trigger --workspace=@max/core -- alpha-scout",
     "trigger:nft-whitelist": "npm run trigger --workspace=@max/core -- wl-hunter",
+    "trigger:degen-hunter": "npm run trigger --workspace=@max/core -- degen-hunter",
     "build": "npm run build --workspace=@max/db && npm run build --workspace=@max/shared && npm run build --workspace=@max/core && npm run build --workspace=@max/dashboard"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
+  },
+  "allowScripts": {
+    "prisma@5.22.0": true,
+    "@prisma/client@5.22.0": true,
+    "@prisma/engines@5.22.0": true,
+    "esbuild@0.28.2": true
   }
 }

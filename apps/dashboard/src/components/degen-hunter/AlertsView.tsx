@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { IconBell, IconRefresh, IconAlertTriangle, IconX, IconChevronDown } from "@tabler/icons-react";
+import { assess } from "./risk";
 import type { DashboardToken } from "./types";
 
 interface Alert {
@@ -62,25 +63,29 @@ async function buildAlerts(): Promise<Alert[]> {
         });
 
         // Risk-based alerts
+        // From the one shared assessment: the level is derived from the flags, so each of
+        // these alerts has the reasons to show. (This used to key off flag names nothing
+        // produced and a LOW opportunity score, so "High Risk" had nothing behind it.)
+        const risk = assess(t);
+        const flags = risk.riskFlags;
         const score = t.totalScore ?? 100;
-        const flags = t.riskFlags ?? [];
 
-        if (flags.includes("extreme-risk") || score < 20) {
+        if (risk.level === "critical") {
           alerts.push({
             id: `risk_extreme_${t.tokenId}`,
             type: "critical",
-            title: "Extreme Risk Detected",
-            body: `${t.name ?? t.tokenId} has extreme risk indicators. ${t.warnings?.[0] ?? "Review flags immediately."}`,
+            title: "Critical Risk",
+            body: `${t.name ?? t.tokenId}: ${risk.warnings.slice(0, 2).join(" · ")}`,
             token: t,
             timestamp: updatedAt,
             severity: "critical",
           });
-        } else if (flags.includes("high-risk") || (score >= 20 && score < 45)) {
+        } else if (risk.level === "high") {
           alerts.push({
             id: `risk_high_${t.tokenId}`,
             type: "risk_change",
             title: "High Risk Token",
-            body: `${t.name ?? t.tokenId} scored ${score}/100. Flags: ${flags.slice(0, 3).join(", ") || "none"}`,
+            body: `${t.name ?? t.tokenId}: ${risk.warnings.slice(0, 2).join(" · ")}`,
             token: t,
             timestamp: updatedAt,
             severity: "warn",
