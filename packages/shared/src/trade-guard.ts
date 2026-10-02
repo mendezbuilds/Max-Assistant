@@ -130,3 +130,89 @@ export function planReconcile(positions: OpenPositionLite[], holdings: Map<strin
   }
   return out;
 }
+
+// ─── Exit price for a position that was closed outside the app ──────────────
+
+/** Best-liquidity DexScreener price (USD) for a Solana mint, or null. */
+export async function fetchUsdPrice(mint: string): Promise<number | null> {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${encodeURIComponent(mint)}`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const pairs = (await res.json()) as any[];
+    const best = (Array.isArray(pairs) ? pairs : []).filter((p) => Number(p?.priceUsd) > 0).sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+    return best ? Number(best.priceUsd) : null;
+  } catch {
+    return null;
+  }
+}
+
+const WRAPPED_SOL = "So11111111111111111111111111111111111111112";
+
+export interface ExternalClose {
+  exitPriceUsd: number;
+  /** SOL the sale returned (exact when `exact`, else an estimate at the last market price). */
+  realizedSOL: number;
+  tokensSold: number;
+  /** When the sale landed, or null if unknown (fallback). */
+  closedAtMs: number | null;
+  /** True when proceeds come from the real on-chain sale; false when the exit price is only the last market price. */
+  exact: boolean;
+  note: string;
+}
+
+/**
+ * What a position that was sold outside the app actually returned, read from the wallet's own transactions:
+ * every successful transaction since the position opened that REDUCED the wallet's balance of the mint. Tokens sold =
+ * the balance drop; proceeds = the wallet's SOL change plus the fee it paid. Exit price = proceeds × SOL/USD ÷ tokens
+ * sold — the same math as a normal in-app sell.
+ *
+ * If the sale can't be found or has no SOL proceeds (the tokens were moved, not sold; or the history isn't available),
+ * falls back to the token's last market price, with `exact: false` so callers can say so. Returns null only if neither works.
+ */
+export async function resolveExternalClose(rpcUrl: string, owner: string, mint: string, sinceMs: number, recordedTokens: number): Promise<ExternalClose | null> {
+  const solUsd = await fetchUsdPrice(WRAPPED_SOL);
+  if (!(solUsd && solUsd > 0)) return null;
+
+  try {
+    const sigs = (await rpc(rpcUrl, "getSignaturesForAddress", [owner, { limit: 100 }])) as any[];
+    let tokensSold = 0;
+    let proceeds = 0;
+    let lastTime = 0;
+    for (const s of sigs) {
+      if (s.err || !s.blockTime || s.blockTime * 1000 < sinceMs - 60_000) continue;
+      const t = await rpc(rpcUrl, "getTransaction", [s.signature, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]);
+      const meta = t?.meta;
+      if (!meta || meta.err) continue;
+      const sum = (arr: any[] | undefined) => (arr ?? []).filter((b) => b.owner === owner && b.mint === mint).reduce((a, b) => a + Number(b.uiTokenAmount?.uiAmountString ?? b.uiTokenAmount?.uiAmount ?? 0), 0);
+      const drop = sum(meta.preTokenBalances) - sum(meta.postTokenBalances);
+      if (!(drop > 0)) continue;
+      const keys: string[] = (t.transaction?.message?.accountKeys ?? []).map((k: any) => (typeof k === "string" ? k : k.pubkey));
+      const i = keys.indexOf(owner);
+      if (i < 0) continue;
+      tokensSold += drop;
+      proceeds += (meta.postBalances[i] - meta.preBalances[i] + (meta.fee ?? 0)) / 1e9;
+      lastTime = Math.max(lastTime, s.blockTime * 1000);
+    }
+    if (tokensSold > 0 && proceeds > 0) {
+      return {
+        exitPriceUsd: (proceeds * solUsd) / tokensSold,
+        realizedSOL: proceeds,
+        tokensSold,
+        closedAtMs: lastTime,
+        exact: true,
+        note: `exit price from the real on-chain sale (${proceeds.toFixed(6)} SOL for ${tokensSold} tokens)`,
+      };
+    }
+  } catch { /* fall through to the market-price fallback */ }
+
+  const px = await fetchUsdPrice(mint);
+  if (!(px && px > 0) || !(recordedTokens > 0)) return null;
+  return {
+    exitPriceUsd: px,
+    realizedSOL: (recordedTokens * px) / solUsd,
+    tokensSold: recordedTokens,
+    closedAtMs: null,
+    exact: false,
+    note: "ESTIMATED exit price: the sale itself wasn't found on-chain, so the last market price was used",
+  };
+}

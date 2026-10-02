@@ -194,7 +194,10 @@ export function renderTradeCardSvg(
   <text x="78" y="128" text-anchor="middle" font-family="${font}" font-size="26" fill="#e8f0ed">${initial}</text>
   <circle cx="78" cy="118" r="26" fill="none" stroke="${accent}" stroke-opacity="0.7" stroke-width="1.8"/>`;
   const symbolX = 116;
-  const chainX = symbolX + Math.min(shown.length + 1, 11) * 20 + 12;
+  // The badge sits after the symbol, so it needs the symbol's real width: capitals are much wider than lowercase (a flat 20px
+  // per character put the badge on top of "$AUTONOM"). Approximate Geist's widths at 34px.
+  const symbolW = ("$" + shown).split("").reduce((w, c) => w + (/[A-Z$@MW%&]/.test(c) ? 25 : /[il.,'!|1:; ]/.test(c) ? 10 : 20), 0);
+  const chainX = symbolX + symbolW + 16;
   const chain = (extras.chain ?? "").toLowerCase();
   const chainBadge = chain
     ? `<g transform="translate(${chainX} 102)">

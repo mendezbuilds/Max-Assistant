@@ -3179,6 +3179,13 @@ export async function sendWatchlistAlert(ownerChatId: string, text: string, char
   });
 }
 
+/** Sends a finished trade card to the owner (used for positions closed outside the app, found by reconciliation). */
+export async function sendTradeCard(ownerChatId: string, png: Buffer, caption: string): Promise<void> {
+  if (!bot) startBot();
+  if (!bot) throw new Error("Degen Hunter bot is not available");
+  await bot.api.sendPhoto(ownerChatId, new InputFile(png, "trade.png"), { caption });
+}
+
 /**
  * Records the price a token had when it went on the watchlist — the "1×" that
  * later multiples are measured against. Only fills a missing baseline, so

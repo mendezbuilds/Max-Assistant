@@ -1,7 +1,9 @@
 import { prisma } from "@max/db";
-import { getTokenHolding, planReconcile, type HoldingResult } from "@max/shared";
+import { getTokenHolding, planReconcile, resolveExternalClose, type HoldingResult } from "@max/shared";
 import { log } from "../../../logger";
 import { rpcEndpoint } from "./rpc";
+import { getClosedTradeStats, buildTradeCardPng, tradeCaption } from "./positionPnl";
+import { sendTradeCard } from "../telegram/bot";
 
 /**
  * Brings OPEN positions in line with the wallet's real token balances (same rule as the dashboard's
@@ -27,10 +29,24 @@ export async function reconcileAllPositions(): Promise<void> {
     for (const a of actions) {
       const p = open.find((x) => x.id === a.id)!;
       if (a.type === "close") {
-        // exitPriceUsd stays empty: the app didn't see this sale, so there's no recorded exit (and no trade card).
+        // The app didn't see this sale: derive the real exit from the wallet's own transactions (or, failing that, the last
+        // market price, flagged as an estimate), so the position gets a trade card like any other close.
         await prisma.degenHunterPosition.update({ where: { id: a.id }, data: { status: "CLOSED", tokenAmount: 0 } });
-        await prisma.$executeRawUnsafe(`UPDATE "DegenHunterPosition" SET closedAt = CURRENT_TIMESTAMP WHERE id = ? AND closedAt IS NULL`, a.id);
-        log("degen-hunter", "info", `${p.tokenSymbol} position closed: ${a.reason}`);
+        const exit = await resolveExternalClose(rpcEndpoint(), w.publicKey!, p.tokenAddress, p.createdAt.getTime(), Number(p.tokenAmount)).catch(() => null);
+        if (exit) {
+          await prisma.$executeRawUnsafe("UPDATE \"DegenHunterPosition\" SET realizedSOL = realizedSOL + ?, exitPriceUsd = ?, closedAt = COALESCE(datetime(?, 'unixepoch'), CURRENT_TIMESTAMP) WHERE id = ? AND exitPriceUsd IS NULL", exit.realizedSOL, exit.exitPriceUsd, exit.closedAtMs ? Math.floor(exit.closedAtMs / 1000) : null, a.id);
+        } else {
+          await prisma.$executeRawUnsafe(`UPDATE "DegenHunterPosition" SET closedAt = CURRENT_TIMESTAMP WHERE id = ? AND closedAt IS NULL`, a.id);
+        }
+        log("degen-hunter", exit && !exit.exact ? "warn" : "info", `${p.tokenSymbol} position closed: ${a.reason}${exit ? `; ${exit.note}` : "; no exit price could be determined"}`);
+        if (exit) {
+          const stats = await getClosedTradeStats(a.id).catch(() => null);
+          if (stats) {
+            const caption = `${tradeCaption(stats)}
+(closed outside the app${exit.exact ? "" : "; exit price is an estimate"})`;
+            await sendTradeCard(w.chatId, await buildTradeCardPng(stats, "dark"), caption).catch((e) => log("degen-hunter", "warn", `Could not send trade card for ${p.tokenSymbol}: ${(e as Error).message}`));
+          }
+        }
       } else {
         await prisma.degenHunterPosition.update({ where: { id: a.id }, data: { tokenAmount: a.amount } });
         log("degen-hunter", "info", `${p.tokenSymbol} position amount corrected to the wallet's real balance (${a.was} → ${a.amount})`);

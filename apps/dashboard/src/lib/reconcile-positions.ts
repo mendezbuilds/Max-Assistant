@@ -1,5 +1,5 @@
 import { prisma, logActivity } from "@max/db";
-import { getTokenHolding, planReconcile, type HoldingResult } from "@max/shared";
+import { getTokenHolding, planReconcile, resolveExternalClose, type HoldingResult } from "@max/shared";
 
 /**
  * Brings OPEN positions in line with the wallet's real token balances: a position whose token the wallet no longer
@@ -22,10 +22,17 @@ export async function reconcilePositions(chatId: string, rpcUrl: string, owner: 
   for (const a of actions) {
     const p = open.find((x) => x.id === a.id)!;
     if (a.type === "close") {
-      // closedAt is a raw column (it postdates the generated client). exitPriceUsd stays empty: the app didn't see this sale, so there's no recorded exit and no trade card.
+      // The app didn't see this sale, so work out the real exit from the wallet's own transactions (or, failing that, the last market
+      // price, flagged as an estimate). With an exit price the position gets a trade card like any other close. The columns are raw SQL
+      // because they postdate the generated client.
       await prisma.degenHunterPosition.update({ where: { id: a.id }, data: { status: "CLOSED", tokenAmount: 0 } });
-      await prisma.$executeRawUnsafe(`UPDATE "DegenHunterPosition" SET closedAt = CURRENT_TIMESTAMP WHERE id = ? AND closedAt IS NULL`, a.id).catch(() => {});
-      await logActivity("degen-hunter", "info", `${p.tokenSymbol} position closed: ${a.reason}`, { kind: "position_reconciled" }).catch(() => {});
+      const exit = await resolveExternalClose(rpcUrl, owner, p.tokenAddress, p.createdAt.getTime(), Number(p.tokenAmount)).catch(() => null);
+      if (exit) {
+        await prisma.$executeRawUnsafe("UPDATE \"DegenHunterPosition\" SET realizedSOL = realizedSOL + ?, exitPriceUsd = ?, closedAt = COALESCE(datetime(?, 'unixepoch'), CURRENT_TIMESTAMP) WHERE id = ? AND exitPriceUsd IS NULL", exit.realizedSOL, exit.exitPriceUsd, exit.closedAtMs ? Math.floor(exit.closedAtMs / 1000) : null, a.id);
+      } else {
+        await prisma.$executeRawUnsafe(`UPDATE "DegenHunterPosition" SET closedAt = CURRENT_TIMESTAMP WHERE id = ? AND closedAt IS NULL`, a.id).catch(() => {});
+      }
+      await logActivity("degen-hunter", "info", `${p.tokenSymbol} position closed: ${a.reason}${exit ? `; ${exit.note}` : "; no exit price could be determined"}`, { kind: "position_reconciled" }).catch(() => {});
     } else {
       await prisma.degenHunterPosition.update({ where: { id: a.id }, data: { tokenAmount: a.amount } });
       await logActivity("degen-hunter", "info", `${p.tokenSymbol} position amount corrected to the wallet's real balance (${a.was} → ${a.amount})`, { kind: "position_reconciled" }).catch(() => {});
